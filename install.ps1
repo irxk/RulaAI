@@ -74,20 +74,29 @@ if ($Model -eq "auto") {
     elseif ($vram -ge 5800) { $Model = "4b" }
     else { Fail ("VRAM が足りません ({0:N1}GB)。6GB 以上の NVIDIA GPU が必要です。" -f ($vram / 1024)) }
 }
-# 作業中に最も膨らむ量 (元のモデルと MTP 付きが並ぶ時)。取得済みのぶんは差し引く:
-# 途中から再開するときに、もう置いてあるファイルの分まで空きを求めない。
-$needGB = if ($Model -eq "9b") { 14 } else { 8 }
-$haveBytes = (Get-ChildItem (Join-Path $PSScriptRoot "models"), (Join-Path $PSScriptRoot "runtime") `
-                -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
-$needGB = [math]::Max(1, [math]::Ceiling($needGB - [double]$haveBytes / 1GB))
-$drive = (Get-Item $PSScriptRoot).PSDrive
-$freeGB = [math]::Floor($drive.Free / 1GB)
-Say "モデル: $Model    空きディスク: ${freeGB}GB (必要: 約${needGB}GB)"
-if ($freeGB -lt $needGB) { Fail "ディスクの空きが足りません。$($drive.Name): ドライブを ${needGB}GB 以上空けてから、もう一度実行してください。" }
-Say ""
-if (-not $Yes) {
-    Say "続けるとダウンロードを始めます (合計 約$(if ($Model -eq '9b') {'7'} else {'4'})GB)。" Cyan
-    $null = Read-Host "Enter で開始 (やめるときはこのウィンドウを閉じてください)"
+# 既に入っているか (llama.cpp と、いずれかのモデル)。入っていれば「更新」:
+# 大きなダウンロードは起きないので、容量確認も開始確認も出さずに進める。
+$haveServer = Test-Path (Join-Path $PSScriptRoot "runtime\llama.cpp\llama-server.exe")
+$haveModel = @(Get-ChildItem (Join-Path $PSScriptRoot "models\gguf\*.gguf") -ErrorAction SilentlyContinue).Count -gt 0
+if ($haveServer -and $haveModel) {
+    Say "モデル: $Model    更新します (Python・llama.cpp・モデルはそのまま、コードだけ入れ替えます)。"
+} else {
+    # はじめての導入: 大きなダウンロードがある。容量を確かめ、始めてよいか尋ねる。
+    # 作業中に最も膨らむ量 (元のモデルと MTP 付きが並ぶ時)。取得済みのぶんは差し引く:
+    # 途中から再開するときに、もう置いてあるファイルの分まで空きを求めない。
+    $needGB = if ($Model -eq "9b") { 14 } else { 8 }
+    $haveBytes = (Get-ChildItem (Join-Path $PSScriptRoot "models"), (Join-Path $PSScriptRoot "runtime") `
+                    -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+    $needGB = [math]::Max(1, [math]::Ceiling($needGB - [double]$haveBytes / 1GB))
+    $drive = (Get-Item $PSScriptRoot).PSDrive
+    $freeGB = [math]::Floor($drive.Free / 1GB)
+    Say "モデル: $Model    空きディスク: ${freeGB}GB (必要: 約${needGB}GB)"
+    if ($freeGB -lt $needGB) { Fail "ディスクの空きが足りません。$($drive.Name): ドライブを ${needGB}GB 以上空けてから、もう一度実行してください。" }
+    Say ""
+    if (-not $Yes) {
+        Say "続けるとダウンロードを始めます (合計 約$(if ($Model -eq '9b') {'7'} else {'4'})GB)。" Cyan
+        $null = Read-Host "Enter で開始 (やめるときはこのウィンドウを閉じてください)"
+    }
 }
 
     $sw = [Diagnostics.Stopwatch]::StartNew()
