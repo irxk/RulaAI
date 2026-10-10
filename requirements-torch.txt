@@ -1,0 +1,8 @@
+# Only for running without llama-server or Ollama: the transformers backend
+# (engine.Engine) and the separate vision model (vision.VisionReader, used when
+# the chat backend cannot read images itself). ~4.8GB installed.
+-r requirements.txt
+torch>=2.2
+transformers>=4.40
+accelerate>=0.29
+bitsandbytes>=0.43

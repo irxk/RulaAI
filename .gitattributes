@@ -1,0 +1,5 @@
+# Windows scripts keep CRLF line endings wherever they are checked out or zipped.
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.ico binary
+*.png binary

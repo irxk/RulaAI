@@ -1,0 +1,22 @@
+# API key hash and hostname.
+.env
+
+# Contains the tunnel UUID and the path to its credentials.
+tunnel.yml
+
+# Fetched at setup, several GB.
+models/
+# llama.cpp binaries and CUDA runtime, fetched by setup_llama.ps1.
+runtime/
+# Built by build.ps1. Rula.lnk holds this machine's Python path.
+Rula.exe
+Rula.lnk
+
+# Runtime state.
+data/
+__pycache__/
+*.py[cod]
+.venv/
+
+# Strings the export check looks for; private by definition.
+.private-patterns.txt
