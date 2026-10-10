@@ -11,6 +11,10 @@
 //   3. when that window closes, stops the backend — which takes llama-server and
 //      its VRAM down with it
 // Launched again while running, it just opens another window onto the same app.
+//
+// It can live anywhere — inside the Rula folder, or on the desktop. build.ps1
+// writes the folder it was built in into InstallDir.g.cs (InstallInfo.Dir), and
+// Rula's own Python under runtime\python is used ahead of any installed one.
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -32,10 +36,10 @@ static class RulaLauncher
     [STAThread]
     static int Main()
     {
-        string app = AppDomain.CurrentDomain.BaseDirectory;
-        if (!Directory.Exists(Path.Combine(app, "src", "rula")))
+        string app = FindApp();
+        if (app == null)
         {
-            Fail("Rula.exe は RulaAI フォルダの中に置いて起動してください。\n(src\\rula が見つかりません)");
+            Fail("Rula の本体が見つかりません。\nセットアップをもう一度実行してください。\n(探した場所: " + InstallInfo.Dir + ")");
             return 1;
         }
         string data = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Rula");
@@ -91,9 +95,27 @@ static class RulaLauncher
         return 0;
     }
 
+    // The Rula folder: next to this exe, else where it was built, else the
+    // one-line installer's default location.
+    static string FindApp()
+    {
+        string[] candidates = {
+            AppDomain.CurrentDomain.BaseDirectory,
+            InstallInfo.Dir,
+            Environment.GetEnvironmentVariable("RULA_HOME"),
+            Path.Combine(Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData), "Programs", "Rula") };
+        foreach (string dir in candidates)
+        {
+            if (!string.IsNullOrEmpty(dir) && Directory.Exists(Path.Combine(dir, "src", "rula")))
+                return dir;
+        }
+        return null;
+    }
+
     static Process StartBackend(string app, int port, string token)
     {
-        string python = FindPython();
+        string python = FindPython(app);
         if (python == null)
         {
             Fail("Python が見つかりません。Python 3 をインストールするか、環境変数 RULA_PYTHON に python.exe の場所を設定してください。");
@@ -108,8 +130,11 @@ static class RulaLauncher
         return Process.Start(psi);
     }
 
-    static string FindPython()
+    static string FindPython(string app)
     {
+        // Rula's own Python (install.ps1): the packages Rula was tested with.
+        string own = Path.Combine(app, "runtime", "python", "pythonw.exe");
+        if (File.Exists(own)) return own;
         string env = Environment.GetEnvironmentVariable("RULA_PYTHON");
         if (!string.IsNullOrEmpty(env) && File.Exists(env)) return env;
         string path = Environment.GetEnvironmentVariable("PATH") ?? "";

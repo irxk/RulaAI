@@ -11,8 +11,9 @@
 #   .\install.ps1                 VRAM に合わせてモデルを選ぶ
 #   .\install.ps1 -Model 4b       4B に固定
 #   .\install.ps1 -NoShortcut     デスクトップとスタートメニューにショートカットを置かない
+#   .\install.ps1 -DesktopExe     デスクトップに Rula.exe を置く (1行インストールの既定)
 param([ValidateSet("auto", "9b", "4b")][string]$Model = "auto",
-      [switch]$NoShortcut, [switch]$NoLaunch, [switch]$Yes)
+      [switch]$NoShortcut, [switch]$DesktopExe, [switch]$NoLaunch, [switch]$Yes)
 $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
 $ProgressPreference = "SilentlyContinue"  # Expand-Archive の進捗表示は遅い
@@ -142,16 +143,56 @@ if (-not $Yes) {
     & (Join-Path $PSScriptRoot "setup_llama.ps1") -Model $Model
 
     # -- 3. 起動用のショートカット --------------------------------------------
-    Say "[3/3] ショートカットを作っています" Cyan
-    if ($NoShortcut) { & (Join-Path $PSScriptRoot "build.ps1") -NoExe }
-    else { & (Join-Path $PSScriptRoot "build.ps1") -NoExe -Shortcut }
+    Say "[3/3] 起動用のファイルを作っています" Cyan
+    $build = Join-Path $PSScriptRoot "build.ps1"
+    if ($NoShortcut) { & $build -NoExe }
+    elseif ($DesktopExe) { & $build -DesktopExe }
+    else { & $build -NoExe -Shortcut }
+    $desktop = [Environment]::GetFolderPath("Desktop")
+    $launcher = if ($DesktopExe -and -not $NoShortcut) { Join-Path $desktop "Rula.exe" }
+                else { Join-Path $PSScriptRoot "Rula.lnk" }
 
     Say ""
     Say ("=== 完了しました ({0:N0} 分) ===" -f $sw.Elapsed.TotalMinutes) Green
-    Say "次からは、デスクトップかスタートメニューの「Rula」、またはこのフォルダの Rula.lnk で起動します。"
+    if ($DesktopExe -and -not $NoShortcut) {
+        Say "次からは、デスクトップの Rula.exe (またはスタートメニューの「Rula」) で起動します。"
+    } else {
+        Say "次からは、デスクトップかスタートメニューの「Rula」、またはこのフォルダの Rula.lnk で起動します。"
+    }
     if (-not $NoLaunch) {
         Say "Rula を起動します (初回はモデルの読み込みに 10 秒ほどかかります)。"
-        Start-Process (Join-Path $PSScriptRoot "Rula.lnk")
+        $since = Get-Date
+        $started = $true
+        try { $proc = Start-Process $launcher -PassThru } catch { $started = $false }
+        # 署名の無い作りたての exe は、ウイルス対策ソフトに消されたり止められたりする
+        # ことがある (開発者の PC で実際に起きた: 起動した瞬間に消え、アプリは開かな
+        # かった)。Rula が立ち上がった印 (running.txt) が出るまで見届け、出ないうちに
+        # exe が消えるか止まったら、誤検知されないショートカットに替える。
+        if ($launcher.EndsWith(".exe")) {
+            $runFile = Join-Path $env:APPDATA "Rula\running.txt"
+            $ok = $false
+            for ($i = 0; $started -and $i -lt 80; $i++) {
+                if ((Test-Path $runFile) -and (Get-Item $runFile).LastWriteTime -ge $since) { $ok = $true; break }
+                if (-not (Test-Path $launcher)) { break }
+                if ($proc.HasExited) {
+                    # Rula was already open: this exe opened another window onto it and ended.
+                    if ($proc.ExitCode -eq 0 -and (Test-Path $runFile)) { $ok = $true }
+                    break
+                }
+                Start-Sleep -Milliseconds 500
+            }
+            # Still starting after 40 s but the exe is there and running: leave it be.
+            if (-not $ok -and $started -and (Test-Path $launcher) -and -not $proc.HasExited) { $ok = $true }
+            if (-not $ok) {
+                if ($started -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+                Remove-Item $launcher -ErrorAction SilentlyContinue
+                & $build -NoExe -Shortcut | Out-Null
+                Say ""
+                Say "デスクトップの Rula.exe がウイルス対策ソフトに止められました (署名の無い exe への誤検知です)。" Yellow
+                Say "代わりにデスクトップへショートカット「Rula」を置きました。こちらから起動してください。" Yellow
+                Start-Process (Join-Path $PSScriptRoot "Rula.lnk")
+            }
+        }
     }
 } catch {
     Say ""

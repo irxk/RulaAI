@@ -20,3 +20,5 @@ __pycache__/
 
 # Strings the export check looks for; private by definition.
 .private-patterns.txt
+# Written by build.ps1: the folder Rula was built in.
+launcher/InstallDir.g.cs

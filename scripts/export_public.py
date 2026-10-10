@@ -27,7 +27,7 @@ ALLOW = [
     "scripts/graft_mtp.py", "scripts/gguf_header.py", "scripts/make_icon.py",
     "scripts/export_public.py",
     "DisBot/discord_bot.py", "DisBot/run_bot.ps1",
-    "Rula-Setup.cmd", "install.ps1", "setup_llama.ps1", "build.ps1",
+    "setup.ps1", "Rula-Setup.cmd", "install.ps1", "setup_llama.ps1", "build.ps1",
     "api.py", "client_example.py", "make_api_key.py", "run_api.ps1", "setup_tunnel.ps1",
     "install_autostart.ps1", "check_identity.py",
     "Modelfile.rula", "setup_ollama.py", "setup_model.py",
@@ -35,6 +35,9 @@ ALLOW = [
     ".env.example", ".gitignore", ".gitattributes", "README.md", "NOTICE", "LICENSE",
 ]
 SKIP_PARTS = {"__pycache__"}
+# Run with "iwr ... | iex": a BOM there breaks the first line (measured in both
+# Windows PowerShell 5.1 and PowerShell 7), so it is kept ASCII without one.
+NO_BOM = {"setup.ps1"}
 TEXT_EXT = {".py", ".ps1", ".cmd", ".md", ".txt", ".lock", ".cs", ".html", ".css", ".js",
             ".example", ".gitignore", ".gitattributes", ""}
 USER_PATH = re.compile(r"[A-Za-z]:[\\/]+Users[\\/]+(?!Public\b)[^\\/\s\"'<>%]+[\\/]", re.I)
@@ -83,8 +86,14 @@ def main():
             if name.endswith(".ps1"):
                 with open(src, encoding="utf-8-sig") as f:
                     text = f.read()
-                with open(dst, "w", encoding="utf-8-sig", newline="") as f:
-                    f.write(text)
+                if rel in NO_BOM:
+                    if not text.isascii():
+                        sys.exit(f"{rel} は ASCII だけで書く必要があります (iwr | iex で実行するため)")
+                    with open(dst, "w", encoding="ascii", newline="") as f:
+                        f.write(text)
+                else:
+                    with open(dst, "w", encoding="utf-8-sig", newline="") as f:
+                        f.write(text)
             else:
                 shutil.copy2(src, dst)
             copied.append(rel)

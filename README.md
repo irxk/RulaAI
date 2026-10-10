@@ -21,6 +21,27 @@ Rula は、NVIDIA の GPU を積んだ Windows PC の中だけで動く、日本
 
 Python などを先に入れておく必要はありません(Rula 専用のものをフォルダの中に用意します)。
 
+### いちばん簡単な方法: 1行で導入
+
+スタートメニューで「PowerShell」と入力して開き、次の1行を貼り付けて Enter を押します。
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/irxk/RulaAI/main/setup.ps1 | iex
+```
+
+表示を確認して Enter を押すと、準備が進みます(回線により 10〜40 分)。終わると
+**デスクトップに `Rula.exe`** ができて Rula が開きます。次からはそれをダブルクリックするだけです。
+
+- 入る場所は `%LOCALAPPDATA%\Programs\Rula` です。別のドライブに入れるときは、先に
+  場所を指定します: `$env:RULA_HOME = "D:\Rula"; iwr -useb https://raw.githubusercontent.com/irxk/RulaAI/main/setup.ps1 | iex`
+- **同じ1行で最新版に更新できます。** モデルなど取得済みのものはそのまま使います。
+- `Rula.exe` は署名の無い exe なので、ウイルス対策ソフトによっては止められます。
+  そうなった場合はセットアップが自動で気づき、デスクトップにショートカット「Rula」を
+  置き換えます(使い方は同じです)。
+- PC の設定は変えません。実行ポリシーも、セットアップを動かす PowerShell の中でだけ許可します。
+
+### ZIP をダウンロードして導入する
+
 1. このページ上の **Code → Download ZIP** でダウンロードし、好きな場所に展開します。
 2. 展開したフォルダの **`Rula-Setup.cmd`** をダブルクリックします。
    「Windows によって PC が保護されました」と出たら、「詳細情報」→「実行」を押します。
@@ -40,8 +61,9 @@ Python などを先に入れておく必要はありません(Rula 専用のも�
 
 ### アンインストール
 
-このフォルダと `%APPDATA%\Rula`(会話の履歴)、デスクトップとスタートメニューの「Rula」を削除してください。
-PC の設定やレジストリには何も書いていません。
+Rula のフォルダ(1行で導入した場合は `%LOCALAPPDATA%\Programs\Rula`)と `%APPDATA%\Rula`
+(会話の履歴)、`%LOCALAPPDATA%\Rula`(画面用のブラウザ設定)、デスクトップの `Rula.exe` または
+「Rula」、スタートメニューの「Rula」を削除してください。PC の設定やレジストリには何も書いていません。
 
 ### うまく動かないとき
 
