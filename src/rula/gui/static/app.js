@@ -305,7 +305,13 @@
         }
       }
     } catch (e) {
-      a.error(e.message);
+      // A dropped connection to the backend (closed or crashed) rejects fetch
+      // with a TypeError ("Failed to fetch"); say what to do, not the raw text.
+      // HTTP errors from api() are plain Error with their own message, so those
+      // still show as-is.
+      a.error(e instanceof TypeError
+        ? "Rula が終了しているようです。このウィンドウを閉じて、開き直してください。"
+        : e.message);
     } finally {
       setBusy(false);
       refreshList();
@@ -421,6 +427,11 @@
   const ping = () => post("/api/ping").catch(() => {});
   ping();
   setInterval(ping, 10000);
+  // A minimized or background window has this timer throttled by the browser to
+  // about once a minute, so ping again the moment the window is shown or woken
+  // from sleep — that refreshes the backend's heartbeat before it times out.
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) ping(); });
+  window.addEventListener("pageshow", ping);
   // Closing the window is how the app quits; this is the signal for it.
   window.addEventListener("pagehide", () => {
     navigator.sendBeacon("/api/bye?t=" + encodeURIComponent(TOKEN));

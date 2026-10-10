@@ -41,11 +41,36 @@ $rel = "https://github.com/ggml-org/llama.cpp/releases/download/b11172"
 $base = "$gguf\rula-$Model-q4_k_m.gguf"
 $mtpOut = "$gguf\rula-$Model-mtp-q4_k_m.gguf"
 
-function Test-Sha($path, $sha) {
-    (Test-Path $path) -and (Get-FileHash $path -Algorithm SHA256).Hash.ToLower() -eq $sha
+function Get-Sha($path) { (Get-FileHash $path -Algorithm SHA256).Hash.ToLower() }
+
+# 照合が済んだ印を、ファイルの隣に .ok として残す(期待する SHA・サイズ・更新日時)。
+function Write-Ok($path, $sha) {
+    $f = Get-Item $path
+    Set-Content -Path "$path.ok" -Encoding ascii -Value "$sha|$($f.Length)|$($f.LastWriteTimeUtc.Ticks)"
 }
+
+# ファイルがあって $sha と一致するか。.ok 印があり、サイズと更新日時が印の時と
+# 同じなら、ハッシュを取り直さずに信用する(数GBの再ハッシュを毎回避ける)。
+# SHA256 自体は、ダウンロード時に1回必ず検証し、印が無い/ファイルが変わった時は
+# ここでも取り直す。スクリプトの期待 SHA が変わった(モデルを更新した)時も、
+# 印の SHA と食い違うので取り直しになる。
+function Test-Verified($path, $sha) {
+    if (-not (Test-Path $path)) { return $false }
+    $f = Get-Item $path
+    $mark = "$path.ok"
+    if (Test-Path $mark) {
+        $p = (Get-Content $mark -TotalCount 1) -split '\|'
+        if ($p.Count -eq 3 -and $p[0] -eq $sha -and $p[1] -eq "$($f.Length)" `
+                -and $p[2] -eq "$($f.LastWriteTimeUtc.Ticks)") {
+            return $true
+        }
+    }
+    if ((Get-Sha $path) -eq $sha) { Write-Ok $path $sha; return $true }
+    return $false
+}
+
 # MTP 付きが照合済みなら元のモデルは要らない(移植の材料としてだけ使う)。
-$mtpReady = (-not $NoMtp) -and (Test-Sha $mtpOut $spec.mtpsha)
+$mtpReady = (-not $NoMtp) -and (Test-Verified $mtpOut $spec.mtpsha)
 
 $items = @()
 # 展開済みなら zip は要らない(展開後に消している)。
@@ -64,7 +89,7 @@ if (-not $NoVision) {
 
 function Get-Verified($it) {
     $name = Split-Path $it.out -Leaf
-    if ((Test-Path $it.out) -and (Get-FileHash $it.out -Algorithm SHA256).Hash.ToLower() -eq $it.sha) {
+    if (Test-Verified $it.out $it.sha) {
         Write-Host "  取得済み: $name" -ForegroundColor Gray
         return
     }
@@ -73,8 +98,8 @@ function Get-Verified($it) {
     & curl.exe -L --fail --retry 20 --retry-delay 3 --retry-all-errors `
         --speed-limit 51200 --speed-time 30 -C - -o $it.out $it.url
     if ($LASTEXITCODE -ne 0) { throw "ダウンロードに失敗しました: $name" }
-    $got = (Get-FileHash $it.out -Algorithm SHA256).Hash.ToLower()
-    if ($got -ne $it.sha) { throw "SHA256 が一致しません: $name (ファイルを消してやり直してください)" }
+    if ((Get-Sha $it.out) -ne $it.sha) { throw "SHA256 が一致しません: $name (ファイルを消してやり直してください)" }
+    Write-Ok $it.out $it.sha
     Write-Host "  照合OK: $name" -ForegroundColor Green
 }
 
@@ -96,10 +121,11 @@ if (-not $NoMtp) {
         & $py -m pip install --quiet --disable-pip-version-check "gguf==0.19.0"
         & $py scripts\graft_mtp.py $base $spec.mtp $mtpOut (Join-Path $gguf ".mtp-work")
         if ($LASTEXITCODE -ne 0) { throw "MTP 層の移植に失敗しました" }
-        if (-not (Test-Sha $mtpOut $spec.mtpsha)) {
+        if ((Get-Sha $mtpOut) -ne $spec.mtpsha) {
             Remove-Item $mtpOut
             throw "MTP 付きモデルの SHA256 が想定と違います。移植版は使わずに続行できます (-NoMtp)。"
         }
+        Write-Ok $mtpOut $spec.mtpsha
         Write-Host "  照合OK: rula-$Model-mtp-q4_k_m.gguf" -ForegroundColor Green
         # 移植の作業用 (MTP 層の取得分)。照合が済めば要らない。
         $work = Join-Path $gguf ".mtp-work"
@@ -107,6 +133,7 @@ if (-not $NoMtp) {
     }
     if ((Test-Path $base) -and -not $KeepBase) {
         Remove-Item $base
+        Remove-Item "$base.ok" -ErrorAction SilentlyContinue
         Write-Host "  元のモデルを削除しました (MTP 付きだけで動きます。-KeepBase で残せます)" -ForegroundColor Gray
     }
 }

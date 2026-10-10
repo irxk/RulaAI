@@ -388,7 +388,13 @@ def _watchdog():
         if bye and (last is None or last < bye) and now - bye > 3:
             log.info("window closed; exiting")
             _quit()
-        if (last is None and now - STATE["started"] > 180) or (last and now - last > 45):
+        # Closing the window says goodbye (/api/bye) and quits at once, above —
+        # that is the normal path. This heartbeat timeout is only the backstop
+        # for a crash or kill that sent no goodbye, so it is generous: a
+        # minimized or backgrounded window has its ping timer throttled by the
+        # browser to about once a minute, and a short timeout quit the backend
+        # while the window was merely in the background.
+        if (last is None and now - STATE["started"] > 180) or (last and now - last > 300):
             log.info("no heartbeat; exiting")
             _quit()
 

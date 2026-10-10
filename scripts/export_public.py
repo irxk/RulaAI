@@ -27,7 +27,7 @@ ALLOW = [
     "scripts/graft_mtp.py", "scripts/gguf_header.py", "scripts/make_icon.py",
     "scripts/export_public.py",
     "DisBot/discord_bot.py", "DisBot/run_bot.ps1",
-    "setup.ps1", "Rula-Setup.cmd", "install.ps1", "setup_llama.ps1", "build.ps1",
+    "setup.ps1", "Rula-Setup.cmd", "install.ps1", "setup_llama.ps1", "build.ps1", "warm.ps1",
     "api.py", "client_example.py", "make_api_key.py", "run_api.ps1", "setup_tunnel.ps1",
     "install_autostart.ps1", "check_identity.py",
     "Modelfile.rula", "setup_ollama.py", "setup_model.py",

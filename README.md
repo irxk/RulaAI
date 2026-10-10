@@ -59,6 +59,14 @@ iwr -useb https://raw.githubusercontent.com/irxk/RulaAI/main/setup.ps1 | iex
 - 生成中は「停止」で止められます。左の一覧から前の会話に戻れます。
 - 英語で聞けば英語で答えます。
 
+### 起動を速くする(任意)
+
+通常は、ウィンドウを閉じるとモデルも VRAM から降り、次回の起動でまた読み込みます
+(9B で約10〜15秒)。何度も開き直すなら、Rula のフォルダで `warm.ps1` を実行して
+ウィンドウを開いたままにしておくと、モデルが常駐して**起動が毎回一瞬**になります。
+そのあいだ VRAM を約6GB 使い続けます。`warm.ps1` のウィンドウで Ctrl+C(または閉じる)
+と解放されます。
+
 ### アンインストール
 
 Rula のフォルダ(1行で導入した場合は `%LOCALAPPDATA%\Programs\Rula`)と `%APPDATA%\Rula`
