@@ -127,6 +127,7 @@ def info(request: Request):
     eng = STATE["engine"]
     return {"status": STATE["status"], "error": STATE["error"],
             "model": getattr(eng, "display_name", None),
+            "size": getattr(eng, "size", None),
             "backend": getattr(eng, "backend", None),
             "mtp": bool(getattr(eng, "mtp", False)),
             "vision": bool(getattr(eng, "supports_vision", False)),

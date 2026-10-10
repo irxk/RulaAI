@@ -58,6 +58,11 @@
     const badges = $("badges");
     badges.innerHTML = "";
     if (info.status === "ready") {
+      if (info.size) {
+        const s = el("span", "badge size", info.size);
+        s.title = "読み込み中のモデルの大きさ (" + info.model + ")";
+        badges.append(s);
+      }
       if (info.mtp) badges.append(el("span", "badge", "MTP"));
       if (info.vision) badges.append(el("span", "badge", "画像OK"));
       if (info.vram_free != null && info.vram_free < 400) {

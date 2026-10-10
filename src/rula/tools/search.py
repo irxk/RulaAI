@@ -294,6 +294,46 @@ def wiktionary_meaning(query: str, chars: int = 900) -> str | None:
             f"出典: https://ja.wiktionary.org/wiki/{title.replace(' ', '_')}")
 
 
+# Ad and click-tracker links some engines slip into results. Measured: a search
+# returned a "bing.com/aclick?..." record-shop ad as the first result. These are
+# not sources and must never be cited.
+_JUNK_URL = re.compile(r"(bing\.com/aclick|/aclk\?|/aclick\?|duckduckgo\.com/y\.js|"
+                       r"google\.com/aclk|doubleclick\.net|/adclick)", re.I)
+
+
+def _dead_wiki_urls(results) -> set:
+    """wikipedia.org article URLs in the results that point to no real article.
+
+    Measured: a search for an obscure term returned "[1] よあ帝国 - Wikipedia"
+    from the scrapers, whose URL ja.wikipedia.org/wiki/よあ帝国 is a red link
+    (404). Cited as a source it looks authoritative but does not exist. One
+    existence check per distinct wiki URL; on any error the result is kept
+    (fail open), so a rate limit never drops good links.
+    """
+    dead, seen = set(), {}
+    for r in results:
+        href = (r.get("href") or "").strip()
+        if href in seen:
+            if seen[href]:
+                dead.add(href)
+            continue
+        m = re.match(r"https?://([a-z]{2,3})\.wikipedia\.org/wiki/([^?#]+)$", href)
+        if not m:
+            continue
+        title = urllib.parse.unquote(m.group(2)).replace("_", " ")
+        try:
+            data = _wikimedia_get(f"https://{m.group(1)}.wikipedia.org/w/api.php",
+                                  {"action": "query", "titles": title, "redirects": 1})
+            page = next(iter(data.get("query", {}).get("pages", {}).values()), {})
+            is_dead = "missing" in page or "invalid" in page
+        except Exception:
+            is_dead = False
+        seen[href] = is_dead
+        if is_dead:
+            dead.add(href)
+    return dead
+
+
 def web_search(query: str, max_results: int = 5) -> str:
     query = query.strip()
     if not query:
@@ -338,6 +378,9 @@ def web_search(query: str, max_results: int = 5) -> str:
     # wikipedia.org ones whose title is bare (the web engines' end in
     # "- Wikipedia"). Kept last, as a fallback, and dropped when the exact-title
     # lookup above found the article.
+    # Drop wikipedia.org results whose article does not actually exist, so a
+    # red-link URL is never handed over as a source.
+    dead_wiki = _dead_wiki_urls(results)
     fuzzy = []
     for r in results:
         title = (r.get("title") or "").strip()
@@ -345,6 +388,8 @@ def web_search(query: str, max_results: int = 5) -> str:
         if len(body) > _MAX_SNIPPET_CHARS:
             body = body[:_MAX_SNIPPET_CHARS] + "…"
         href = (r.get("href") or "").strip()
+        if href in dead_wiki or _JUNK_URL.search(href):
+            continue
         if wiki_url and urllib.parse.unquote(href).replace(" ", "_") == wiki_url:
             continue  # the same article, already first
         block = f"{title}\n{body}\n出典: {href}"

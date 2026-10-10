@@ -76,6 +76,29 @@ MMPROJ_PATH = os.environ.get("RULA_MMPROJ") or _first(
 DISPLAY_NAME = os.environ.get("RULA_DISPLAY_NAME",
                               "Rula2.0-9b" if SIZE == "9b" else "Rula1.2-4b")
 PORT = int(os.environ.get("RULA_LLAMA_PORT", "8081"))
+
+# Whether MTP is on cannot be read back from a running server's /props, so the
+# process that starts it records it here. A later process that reuses the warm
+# server (warm.ps1 / the app relaunching) reads it, so the "MTP" badge is right
+# even though it did not start the server itself.
+_STATE_FILE = os.path.join(os.path.dirname(MODEL_PATH), ".rula-server.json")
+
+
+def _write_state(mtp: bool):
+    try:
+        with open(_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"model": os.path.basename(MODEL_PATH), "mtp": bool(mtp)}, f)
+    except Exception:
+        pass
+
+
+def _read_state():
+    try:
+        with open(_STATE_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        return d if d.get("model") == os.path.basename(MODEL_PATH) else None
+    except Exception:
+        return None
 HOST = f"http://127.0.0.1:{PORT}"
 # Same budget as the Ollama path; see the measurement notes on NUM_CTX there.
 NUM_CTX = int(os.environ.get("RULA_NUM_CTX", "16384"))
@@ -236,6 +259,7 @@ class LlamaServerEngine:
         self.device = "cuda"
         self.quantized = True
         self.backend = "llama-server"
+        self.size = SIZE.upper()  # "9B" / "4B", shown as a badge so the two are clear
         self.hit_token_limit = False  # set by generate(); see Engine.generate
         self.last_reasoning: str | None = None  # the reasoning for one turn
         self.last_timings: dict | None = None  # the server's own prefill/decode timings
@@ -267,6 +291,12 @@ class LlamaServerEngine:
         template = props.get("chat_template") or ""
         self.supports_thinking = "enable_thinking" in template or "<think>" in template
         self.supports_vision = bool((props.get("modalities") or {}).get("vision"))
+        # Reused a server we did not start (warm.ps1): read the MTP state the
+        # starter recorded, so the badge is not blank when MTP is in fact on.
+        if self.mtp is None:
+            st = _read_state()
+            if st is not None:
+                self.mtp = st.get("mtp")
 
     # -- process ------------------------------------------------------------
     def _start(self, timeout: float):
@@ -289,6 +319,7 @@ class LlamaServerEngine:
                     break
                 if _healthy():
                     self.mtp = mtp
+                    _write_state(mtp)
                     _warn_if_vram_tight()
                     return
                 time.sleep(0.5)
