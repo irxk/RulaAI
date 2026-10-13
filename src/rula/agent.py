@@ -57,10 +57,12 @@ DECLINE_RE = re.compile(
 # name group is permissive and the registry decides what's real.
 _NAME = r"([^\s:：<>]{1,12})"
 _COLON = r"\s*[:：]\s*"
-TOOL_CALL_RE = re.compile(rf"<tool>\s*{_NAME}{_COLON}(.*?)\s*</tool>", re.S | re.I)
+TOOL_CALL_RE = re.compile(
+    rf"<tool>\s*{_NAME}(?:{_COLON}(.*?))?\s*</tool>", re.S | re.I)
 # Small models routinely drop the XML tags and just write "calc: 1+2", so accept
 # that too — but only at the very start of the reply, to avoid false positives.
-BARE_CALL_RE = re.compile(rf"^\s*(?:<tool>)?\s*{_NAME}{_COLON}(.*?)\s*(?:</tool>)?\s*$", re.I)
+BARE_CALL_RE = re.compile(
+    rf"^\s*(?:<tool>)?\s*{_NAME}(?:{_COLON}(.*?))?\s*(?:</tool>)?\s*$", re.I)
 # The model invents its own wrappers for reasoning — <thought>, <思考整理> — and any
 # of them leak the working-out into the reply if only <think> is stripped.
 _THINK_TAG = r"think|thinking|thought|reasoning|思考[^>\s]*|検討[^>\s]*"
@@ -488,7 +490,7 @@ class Agent:
             self._grounded = bool(scratch) or self._turn_note is not None
 
             if self.config.thinking and not self._native_thinking:
-                thinking, answer = self._think_then_answer(scratch)
+                thinking, answer = self._think_then_answer(scratch, trace)
             else:
                 # With native reasoning the thinking happens inside this same
                 # generation, so there is no separate pass to run: the model reasons,
@@ -521,7 +523,7 @@ class Agent:
             # Rewrites only when the answer has not already been shown. A streamed
             # answer is on the user's screen; replacing it afterwards would leave
             # history holding a different reply from the one they read.
-            had_search = bool(scratch)
+            had_search = bool(trace.tool_calls)
             if not trace.streamed or self.config.preview:
                 # Quality gate: if the answer is poor, regenerate with feedback.
                 quality, issues = score_answer(answer, had_search)
@@ -774,7 +776,7 @@ class Agent:
             # Once material has been gathered this pass is the answer itself, and a
             # long write-up is worth streaming. Before that the output might turn out
             # to be a tool request, which the user should not see.
-            grounded = bool(scratch)
+            grounded = bool(trace.tool_calls)
             # Stopping at </tool> also means a tool request costs only a few tokens.
             text = self._generate(scratch, stop=["</tool>"],
                                   stream=grounded or self.config.preview)
@@ -791,7 +793,8 @@ class Agent:
         trace.streamed = self._echoes
         return self._generate(scratch, stream=True)
 
-    def _think_then_answer(self, scratch: list[dict]) -> tuple[str | None, str]:
+    def _think_then_answer(self, scratch: list[dict],
+                           trace: Trace) -> tuple[str | None, str]:
         """Reason first, then write the answer as a fresh reply.
 
         The reasoning gets its own, smaller budget — left to run to the full limit
@@ -807,14 +810,14 @@ class Agent:
             self._generate(scratch, stop=["</think>"], prefill="<think>\n",
                            max_new_tokens=budget).strip())
 
-        notes = scratch + [{"role": "user", "content":
-                            f"事前に整理した検討メモ:\n---\n{thinking}\n---\n"
-                            "このメモは下書きであり、回答ではありません。"
-                            "メモの要約ではなく、これを踏まえた回答を最初から書いてください。"}]
-        answer = self._answer_from_notes(notes)
+        scratch.append({"role": "user", "content":
+                        f"事前に整理した検討メモ:\n---\n{thinking}\n---\n"
+                        "このメモは下書きであり、回答ではありません。"
+                        "メモの要約ではなく、これを踏まえた回答を最初から書いてください。"})
+        answer = self._answer_from_notes(scratch, trace)
         return (thinking or None), answer
 
-    def _answer_from_notes(self, notes: list[dict]) -> str:
+    def _answer_from_notes(self, notes: list[dict], trace: Trace) -> str:
         """Write the answer, retrying if it collapses into an acknowledgement.
 
         Roughly one attempt in three came back as ~40 characters ("承知しました" and
@@ -822,9 +825,9 @@ class Agent:
         worth simply asking again rather than shipping the short one.
         """
         best = ""
-        for attempt in range(3):
-            _, answer = self._split_thinking(
-                self._generate(notes, stream=(attempt == 0)).strip())
+        for _ in range(3):
+            generated = self._answer_or_tool(notes, trace)
+            _, answer = self._split_thinking(generated.strip())
             answer = answer.strip()
             if len(answer) > len(best):
                 best = answer
@@ -844,7 +847,9 @@ class Agent:
         if m:
             tool = self.tools.get(m.group(1))
             if tool is not None:
-                return tool.name, m.group(2).strip()
+                argument = m.group(2)
+                if argument is not None or tool.usage == "引数なし":
+                    return tool.name, (argument or "").strip()
 
         # Tag-less fallback. Only the first line counts: the model often keeps
         # writing (and hallucinating a result) after the call it wanted to make.
@@ -854,7 +859,9 @@ class Agent:
         if m:
             tool = self.tools.get(m.group(1))
             if tool is not None:
-                return tool.name, m.group(2).strip()
+                argument = m.group(2)
+                if argument is not None or tool.usage == "引数なし":
+                    return tool.name, (argument or "").strip()
         return None
 
     def _tool_result_prompt(self, result: str, tool: str | None = None) -> str:
