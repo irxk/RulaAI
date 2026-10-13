@@ -13,7 +13,8 @@
   };
   const escapeHtml = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-  const state = { chatId: null, busy: false, image: null, thumb: null, think: false, info: null };
+  const state = { chatId: null, busy: false, image: null, thumb: null, think: false, info: null,
+                  workspace: localStorage.getItem("rula-workspace") || "", interaction: null };
 
   async function api(path, opts = {}) {
     opts.headers = Object.assign({ "X-Rula-Token": TOKEN }, opts.headers || {});
@@ -71,10 +72,43 @@
         badges.append(b);
       }
     }
-    $("attach").disabled = !(info.status === "ready" && info.vision);
+    $("attach").disabled = !(info.status === "ready" && info.vision) || $("profile").value === "coder";
     $("attach").title = info.vision ? "画像を添付" : "このモデルでは画像を読めません";
     $("think").disabled = !(info.status === "ready" && info.thinking);
     updateSend();
+  }
+
+  function updateProfile() {
+    const coder = $("profile").value === "coder";
+    $("coder-mode").hidden = !coder;
+    $("coder-effort").hidden = !coder;
+    $("workspace-select").hidden = !coder;
+    $("workspace-name").hidden = !coder;
+    $("workspace-name").textContent = state.workspace || "未選択";
+    $("coder-effort").title = {
+      small: "小: 最大8回のツール利用。速度優先。",
+      medium: "中: 最大14回のツール利用。調査・実装・検証の標準。",
+      large: "大: 最大24回のツール利用。思考・調査・回答量を拡張。9Bモデルは同一。",
+    }[$("coder-effort").value];
+    $("attach").disabled = coder || !(state.info && state.info.status === "ready" && state.info.vision);
+    if (coder) clearAttachment();
+    updateSend();
+  }
+
+  async function selectWorkspace() {
+    $("workspace-select").disabled = true;
+    try {
+      const data = await (await post("/api/workspace/select")).json();
+      if (data.workspace) {
+        state.workspace = data.workspace;
+        localStorage.setItem("rula-workspace", state.workspace);
+      }
+      updateProfile();
+    } catch (e) {
+      $("hint").textContent = "フォルダを選べませんでした: " + e.message;
+    } finally {
+      $("workspace-select").disabled = false;
+    }
   }
 
   // ---------------------------------------------------------------- chat list
@@ -128,6 +162,14 @@
     let chat;
     try { chat = await (await api("/api/chats/" + id)).json(); } catch (_) { return; }
     state.chatId = id;
+    $("profile").value = chat.profile || (chat.coder_workspace ? "coder" : "general");
+    $("coder-mode").value = chat.coder_mode || "chat";
+    $("coder-effort").value = chat.coder_effort || "medium";
+    if (chat.coder_workspace) {
+      state.workspace = chat.coder_workspace;
+      localStorage.setItem("rula-workspace", state.workspace);
+    }
+    updateProfile();
     $("chat-title").textContent = chat.title || "";
     const box = $("messages");
     box.innerHTML = "";
@@ -163,8 +205,10 @@
     emptyState.remove();
     const m = el("div", "msg assistant");
     const status = el("div", "status", '<span class="dots"><i></i><i></i><i></i></span><span class="st"></span>');
+    const plan = el("div", "work-plan");
+    plan.hidden = true;
     const body = el("div", "body");
-    m.append(status, body);
+    m.append(status, plan, body);
     $("messages").append(m);
     let thinkBox = null;
     let pending = null;
@@ -186,6 +230,26 @@
 
     return {
       status(text) { status.hidden = false; status.querySelector(".st").textContent = text || ""; scrollToEnd(); },
+      plan(tasks) {
+        if (!Array.isArray(tasks) || !tasks.length) {
+          plan.hidden = true;
+          return;
+        }
+        plan.hidden = false;
+        plan.replaceChildren();
+        const heading = el("div", "work-plan-title", "作業計画");
+        const list = el("ol", "work-plan-list");
+        for (const task of tasks) {
+          const item = el("li", "work-plan-" + task.status);
+          item.textContent = task.step;
+          const stateLabel = el("span", "work-plan-state",
+            { pending: "待機", in_progress: "作業中", completed: "完了" }[task.status] || task.status);
+          item.append(stateLabel);
+          list.append(item);
+        }
+        plan.append(heading, list);
+        scrollToEnd();
+      },
       thinking(text) { setThinking(text, true); scrollToEnd(); },
       stream(text) {
         // Rendered at most once a frame: tokens arrive faster than layout.
@@ -201,21 +265,78 @@
       final(ev) {
         pending = null;
         status.hidden = true;
+        this.plan(ev.coder_plan || ev.plan);
         if (ev.thinking) {
           setThinking(ev.thinking, false);
           thinkBox.open = false;
         }
         body.innerHTML = window.renderMarkdown(ev.answer != null ? ev.answer : ev.content || "");
-        const meta = el("div", "meta");
-        const bits = [];
-        if (ev.elapsed != null) bits.push(ev.elapsed + "秒");
-        for (const t of ev.tools || []) {
-          const label = { search: "検索", deep_search: "検索", smart_search: "検索", read_url: "ページ",
-                          calc: "計算", date: "日付計算" }[t.name] || t.name;
-          bits.push(label + (/search/.test(t.name) ? ": " + t.arg : ""));
+        const filesChanged = [...new Set(ev.files_changed || [])];
+        const tools = ev.tools || [];
+        if (ev.elapsed != null || filesChanged.length || tools.length || ev.stopped) {
+          const labels = {
+            search: "検索", deep_search: "検索", smart_search: "検索", read_url: "ページ閲覧",
+            calc: "計算", date: "日付計算", list_files: "ファイル一覧",
+            read_file: "ファイル読み込み", search_code: "コード検索",
+            project_info: "プロジェクト情報", update_plan: "作業計画更新",
+            git_status: "Git状態確認", git_diff: "Git差分確認", ask_user: "質問",
+            write_file: "ファイル保存", edit_file: "ファイル編集",
+            apply_patch: "パッチ適用", review_changes: "差分レビュー",
+            run_command: "コマンド実行",
+          };
+          const summaryBits = [];
+          if (ev.elapsed != null) summaryBits.push("処理時間 " + ev.elapsed + "秒");
+          if (filesChanged.length) summaryBits.push(filesChanged.length + "ファイルを編集");
+          if (tools.length) summaryBits.push("操作 " + tools.length + "回");
+          if (ev.stopped) summaryBits.push("停止");
+
+          const details = el("details", "turn-details");
+          details.append(el("summary", null, summaryBits.join(" · ") || "回答の詳細"));
+          const content = el("div", "turn-details-content");
+          if (ev.elapsed != null) {
+            const section = el("div", "turn-detail-section");
+            section.append(el("strong", null, "処理時間"));
+            section.append(el("span", null, ev.elapsed + "秒"));
+            content.append(section);
+          }
+          if (filesChanged.length) {
+            const section = el("div", "turn-detail-section");
+            section.append(el("strong", null, "編集したファイル"));
+            const list = el("ul");
+            for (const path of filesChanged) {
+              const item = el("li");
+              item.textContent = path;
+              list.append(item);
+            }
+            section.append(list);
+            content.append(section);
+          }
+          if (tools.length) {
+            const section = el("div", "turn-detail-section");
+            section.append(el("strong", null, "使用した操作"));
+            const counts = new Map();
+            for (const tool of tools) {
+              const label = labels[tool.name] || tool.name;
+              counts.set(label, (counts.get(label) || 0) + 1);
+            }
+            const list = el("ul");
+            for (const [label, count] of counts) {
+              const item = el("li");
+              item.textContent = label + (count > 1 ? " (" + count + "回)" : "");
+              list.append(item);
+            }
+            section.append(list);
+            content.append(section);
+          }
+          if (ev.stopped) {
+            const section = el("div", "turn-detail-section");
+            section.append(el("strong", null, "状態"), el("span", null, "停止しました"));
+            content.append(section);
+          }
+          details.append(content);
+          m.append(details);
         }
-        if (ev.stopped) bits.push("停止しました");
-        meta.append(el("span", null, escapeHtml(bits.join(" · "))));
+        const meta = el("div", "meta");
         const copy = el("button", "act", "コピー");
         copy.type = "button";
         copy.addEventListener("click", () => {
@@ -263,6 +384,17 @@
     const text = (textOverride != null ? textOverride : $("input").value).trim();
     if (!text && !state.image) return;
     if (!state.info || state.info.status !== "ready") return;
+    const profile = $("profile").value;
+    const coderMode = $("coder-mode").value;
+    const coderEffort = $("coder-effort").value;
+    if (profile === "coder" && !state.workspace) {
+      $("hint").textContent = "先にCoderの作業フォルダを選んでください。";
+      return;
+    }
+    if (profile === "coder" && coderMode === "auto" &&
+        !window.confirm("オートモードの注意\n\nCoderが選択した作業フォルダ内のファイルを変更します。"
+          + "コマンドを実行するたびに別途確認します。変更を元に戻せない場合があります。\n\n"
+          + "作業フォルダ: " + state.workspace + "\n\n続行しますか？")) return;
 
     const image = state.image, thumb = state.thumb;
     addUser(text, thumb);
@@ -287,13 +419,17 @@
         case "thinking": thinking += ev.text; a.thinking(thinking); break;
         case "token": answer += ev.text; a.stream(answer); break;
         case "reset": answer = ""; break;
+        case "interaction": showInteraction(ev); break;
+        case "plan": a.plan(ev.tasks); break;
         case "done": a.final(ev); break;
         case "error": a.error(ev.text); break;
       }
     };
     try {
       const r = await post("/api/chat", { chat_id: state.chatId, message: text, image, thumb,
-                                          think: state.think });
+                                          think: state.think, profile, coder_mode: coderMode,
+                                          coder_effort: coderEffort,
+                                          workspace: state.workspace || null });
       const reader = r.body.getReader();
       const dec = new TextDecoder();
       let buf = "";
@@ -324,9 +460,44 @@
     }
   }
 
+  function showInteraction(ev) {
+    state.interaction = ev;
+    const command = ev.kind === "command";
+    $("interaction-title").textContent = command ? "コマンド実行の確認" : "Coderからの質問";
+    $("interaction-message").textContent = command
+      ? "以下のコマンドを作業フォルダ内で実行してよいですか？"
+      : ev.message || "追加情報を入力してください。";
+    $("interaction-command").hidden = !command;
+    $("interaction-command").textContent = command ? ev.command : "";
+    $("interaction-answer").hidden = command;
+    $("interaction-answer").value = "";
+    $("interaction-cancel").hidden = false;
+    $("interaction-deny").hidden = !command;
+    $("interaction-submit").hidden = command;
+    $("interaction-approve").hidden = !command;
+    $("interaction").hidden = false;
+    if (!command) $("interaction-answer").focus();
+  }
+
+  async function replyInteraction(response) {
+    if (!state.interaction) return;
+    const current = state.interaction;
+    state.interaction = null;
+    $("interaction").hidden = true;
+    try {
+      await post("/api/interaction", { interaction_id: current.interaction_id, response });
+    } catch (e) {
+      $("hint").textContent = "確認への応答に失敗しました: " + e.message;
+    }
+  }
+
   // ---------------------------------------------------------------- images
   async function attachFile(file) {
     if (!file || !/^image\//.test(file.type)) return;
+    if ($("profile").value === "coder") {
+      $("hint").textContent = "Coderでは画像添付できません";
+      return;
+    }
     if (!state.info || !state.info.vision) {
       $("hint").textContent = "このモデルでは画像を読めません";
       return;
@@ -383,7 +554,11 @@
   });
   $("composer").addEventListener("submit", (e) => {
     e.preventDefault();
-    if (state.busy) post("/api/stop").catch(() => {});
+    if (state.busy) {
+      state.interaction = null;
+      $("interaction").hidden = true;
+      post("/api/stop").catch(() => {});
+    }
     else send();
   });
   $("attach").addEventListener("click", () => $("file").click());
@@ -393,6 +568,15 @@
     state.think = !state.think;
     $("think").setAttribute("aria-pressed", String(state.think));
   });
+  $("profile").addEventListener("change", updateProfile);
+  $("coder-mode").addEventListener("change", () => updateProfile());
+  $("workspace-select").addEventListener("click", selectWorkspace);
+  $("interaction-submit").addEventListener("click", () =>
+    replyInteraction($("interaction-answer").value.trim()));
+  $("interaction-approve").addEventListener("click", () => replyInteraction("approved"));
+  $("interaction-deny").addEventListener("click", () => replyInteraction("denied"));
+  $("interaction-cancel").addEventListener("click", () =>
+    replyInteraction(state.interaction && state.interaction.kind === "command" ? "denied" : ""));
   $("new-chat").addEventListener("click", newChat);
   $("toggle-side").addEventListener("click", () => document.body.classList.toggle("side-closed"));
   for (const chip of document.querySelectorAll(".chip")) {
@@ -445,5 +629,6 @@
   if (window.innerWidth < 760) document.body.classList.add("side-closed");
   pollInfo();
   refreshList();
+  updateProfile();
   $("input").focus();
 })();

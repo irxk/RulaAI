@@ -175,7 +175,29 @@ header {
 .thinking .tbody { margin-top: 6px; padding: 8px 12px; border-left: 2px solid var(--border);
                    white-space: pre-wrap; max-height: 260px; overflow-y: auto; }
 
+.turn-details { margin-top: 8px; color: var(--muted); font-size: 12.5px; }
+.turn-details summary { width: fit-content; cursor: pointer; color: var(--faint); }
+.turn-details-content {
+  display: grid; gap: 8px; margin-top: 8px; padding: 10px 12px;
+  border-left: 2px solid var(--border); background: var(--side); border-radius: 0 8px 8px 0;
+}
+.turn-detail-section { display: grid; gap: 3px; }
+.turn-detail-section strong { color: var(--text); font-weight: 600; }
+.turn-detail-section ul { margin: 0; padding-left: 20px; }
+.turn-detail-section li { overflow-wrap: anywhere; }
+
 .status { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 14px; min-height: 26px; }
+.work-plan {
+  margin: 0 0 12px; padding: 10px 14px; border: 1px solid var(--border);
+  border-radius: 12px; background: var(--side); font-size: 13px;
+}
+.work-plan-title { font-weight: 600; color: var(--muted); }
+.work-plan-list { margin: 5px 0 0; padding-left: 22px; }
+.work-plan-list li { padding: 1px 0; }
+.work-plan-state { margin-left: 8px; color: var(--faint); font-size: 11px; white-space: nowrap; }
+.work-plan-in_progress .work-plan-state { color: var(--warn-text); font-weight: 600; }
+.work-plan-completed { color: var(--muted); }
+.work-plan-completed .work-plan-state { color: #258345; }
 .dots { display: inline-flex; gap: 4px; }
 .dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); animation: pulse 1.2s infinite; }
 .dots i:nth-child(2) { animation-delay: .15s; } .dots i:nth-child(3) { animation-delay: .3s; }
@@ -194,6 +216,14 @@ footer { flex: none; padding: 0 24px 18px; }
   border-radius: 24px; padding: 10px 10px 8px 16px; box-shadow: var(--shadow);
 }
 .composer:focus-within { border-color: var(--faint); }
+.profile-row { display: flex; align-items: center; gap: 6px; margin: 0 0 4px; }
+.profile-row select, .profile-row button {
+  max-width: 180px; border: 1px solid var(--border); border-radius: 999px;
+  background: var(--bg); color: var(--muted); padding: 4px 10px; font: inherit;
+  font-size: 12px; cursor: pointer;
+}
+.profile-row #workspace-name { overflow: hidden; color: var(--faint); font-size: 12px;
+                               text-overflow: ellipsis; white-space: nowrap; }
 .composer textarea {
   display: block; width: 100%; border: 0; outline: 0; resize: none; background: none;
   color: var(--text); font: inherit; max-height: 220px; padding: 4px 4px 2px 0;
@@ -230,6 +260,29 @@ body.busy .send .i-stop { display: block; fill: currentColor; stroke: none; }
 }
 .drop div { background: var(--bg); color: var(--text); padding: 20px 32px; border-radius: 16px;
             border: 2px dashed var(--faint); font-size: 16px; }
+.interaction {
+  position: fixed; inset: 0; z-index: 20; display: flex; align-items: center;
+  justify-content: center; padding: 20px; background: rgba(0, 0, 0, .48);
+}
+.interaction-card {
+  width: min(560px, 100%); padding: 22px; border: 1px solid var(--border);
+  border-radius: 16px; background: var(--bg); box-shadow: var(--shadow);
+}
+.interaction-card h2 { margin: 0 0 8px; font-size: 18px; }
+.interaction-card p { margin: 0 0 12px; color: var(--muted); white-space: pre-wrap; }
+.interaction-card pre, .interaction-card textarea {
+  width: 100%; max-height: 240px; overflow: auto; margin: 0 0 14px; padding: 10px;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--code-bg);
+  color: var(--text); font: 13px/1.5 "Cascadia Code", Consolas, monospace;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.interaction-card textarea { resize: vertical; font: inherit; }
+.interaction-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.interaction-actions button {
+  padding: 7px 12px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); color: var(--text); cursor: pointer;
+}
+#interaction-approve { background: var(--accent); color: var(--accent-text); }
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; border: 2px solid var(--bg); }
