@@ -272,23 +272,89 @@ def select_workspace(request: Request):
     _check(request)
     if os.name != "nt":
         raise HTTPException(501, "この環境ではフォルダ選択ダイアログを利用できません。")
-    script = (
-        "Add-Type -AssemblyName System.Windows.Forms; "
-        "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; "
-        "public static class RulaDialogActivation { "
-        "[DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr hWnd, "
-        "IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint flags); "
-        "[DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr hWnd); }'; "
-        "$d = New-Object System.Windows.Forms.FolderBrowserDialog; "
-        "$d.Description = 'Rula Coder が操作する作業フォルダを選択'; "
-        "$d.ShowNewFolderButton = $false; "
-        "$timer = New-Object System.Windows.Forms.Timer; $timer.Interval = 250; "
-        "$timer.add_Tick({ $timer.Stop(); "
-        "[void][RulaDialogActivation]::SetWindowPos($d.Handle, [IntPtr](-1), 0, 0, 0, 0, 0x43); "
-        "[void][RulaDialogActivation]::SetForegroundWindow($d.Handle) }); $timer.Start(); "
-        "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) "
-        "{ [Console]::WriteLine($d.SelectedPath) }"
-    )
+    script = r"""
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+[ComImport]
+[Guid("D57C7288-D4AD-4768-BE02-9D969532D960")]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IRulaFileOpenDialog {
+    [PreserveSig] int Show(IntPtr parent);
+    [PreserveSig] int SetFileTypes(uint count, IntPtr types);
+    [PreserveSig] int SetFileTypeIndex(uint index);
+    [PreserveSig] int GetFileTypeIndex(out uint index);
+    [PreserveSig] int Advise(IntPtr events, out uint cookie);
+    [PreserveSig] int Unadvise(uint cookie);
+    [PreserveSig] int SetOptions(uint options);
+    [PreserveSig] int GetOptions(out uint options);
+    [PreserveSig] int SetDefaultFolder(IntPtr item);
+    [PreserveSig] int SetFolder(IntPtr item);
+    [PreserveSig] int GetFolder(out IntPtr item);
+    [PreserveSig] int GetCurrentSelection(out IntPtr item);
+    [PreserveSig] int SetFileName([MarshalAs(UnmanagedType.LPWStr)] string name);
+    [PreserveSig] int GetFileName(out IntPtr name);
+    [PreserveSig] int SetTitle([MarshalAs(UnmanagedType.LPWStr)] string title);
+    [PreserveSig] int SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string text);
+    [PreserveSig] int SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string label);
+    [PreserveSig] int GetResult(out IntPtr item);
+    [PreserveSig] int AddPlace(IntPtr item, uint alignment);
+    [PreserveSig] int SetDefaultExtension([MarshalAs(UnmanagedType.LPWStr)] string extension);
+    [PreserveSig] int Close(int result);
+    [PreserveSig] int SetClientGuid(ref Guid guid);
+    [PreserveSig] int ClearClientData();
+    [PreserveSig] int SetFilter(IntPtr filter);
+    [PreserveSig] int GetResults(out IntPtr items);
+    [PreserveSig] int GetSelectedItems(out IntPtr items);
+}
+
+[ComImport]
+[Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE")]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IRulaShellItem {
+    [PreserveSig] int BindToHandler(IntPtr bindContext, ref Guid handler, ref Guid iid, out IntPtr result);
+    [PreserveSig] int GetParent(out IntPtr parent);
+    [PreserveSig] int GetDisplayName(uint nameType, out IntPtr name);
+    [PreserveSig] int GetAttributes(uint mask, out uint attributes);
+    [PreserveSig] int Compare(IntPtr other, uint hint, out int order);
+}
+
+public static class RulaFolderPicker {
+    public static string Pick() {
+        Type dialogType = Type.GetTypeFromCLSID(
+            new Guid("DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7"), true);
+        IRulaFileOpenDialog dialog = (IRulaFileOpenDialog)Activator.CreateInstance(dialogType);
+        IntPtr itemPointer = IntPtr.Zero;
+        IRulaShellItem item = null;
+        try {
+            uint options;
+            Marshal.ThrowExceptionForHR(dialog.GetOptions(out options));
+            options |= 0x20 | 0x40 | 0x800 | 0x8;
+            Marshal.ThrowExceptionForHR(dialog.SetOptions(options));
+            int result = dialog.Show(IntPtr.Zero);
+            if (result == unchecked((int)0x800704C7)) return null;
+            Marshal.ThrowExceptionForHR(result);
+            Marshal.ThrowExceptionForHR(dialog.GetResult(out itemPointer));
+            item = (IRulaShellItem)Marshal.GetObjectForIUnknown(itemPointer);
+            IntPtr namePointer;
+            Marshal.ThrowExceptionForHR(item.GetDisplayName(0x80058000, out namePointer));
+            try {
+                return Marshal.PtrToStringUni(namePointer);
+            } finally {
+                Marshal.FreeCoTaskMem(namePointer);
+            }
+        } finally {
+            if (item != null) Marshal.ReleaseComObject(item);
+            if (itemPointer != IntPtr.Zero) Marshal.Release(itemPointer);
+            Marshal.ReleaseComObject(dialog);
+        }
+    }
+}
+'@
+$selected = [RulaFolderPicker]::Pick()
+if ($selected) { [Console]::WriteLine($selected) }
+"""
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-STA", "-Command", script],
         capture_output=True, text=True, timeout=300,
