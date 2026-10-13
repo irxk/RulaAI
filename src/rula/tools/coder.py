@@ -66,7 +66,9 @@ class CoderTools:
             "引数なし", self.project_info))
         registry.register(Tool(
             "update_plan", "現在の作業計画と進捗をユーザーに共有する",
-            "JSON配列: [{\"step\":\"内容\",\"status\":\"pending|in_progress|completed\"}]", self.update_plan))
+            "引数なし (現在の計画を維持) または JSON配列: "
+            "[{\"step\":\"内容\",\"status\":\"pending|in_progress|completed\"}]",
+            self.update_plan))
         registry.register(Tool(
             "git_status", "Gitの変更状態を確認する (読み取り専用)",
             "引数なし", self.git_status))
@@ -203,6 +205,11 @@ class CoderTools:
         return "\n".join(parts)
 
     def update_plan(self, argument: str) -> str:
+        if not argument.strip():
+            if self._plan:
+                return "現在の作業計画を維持しました。次の作業を続けてください。"
+            return ("計画がありません。JSON配列で手順を指定してください。"
+                    "例: [{\"step\":\"関連コードを調査する\",\"status\":\"pending\"}]")
         try:
             data = json.loads(argument)
         except json.JSONDecodeError as exc:
