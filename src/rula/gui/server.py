@@ -516,6 +516,8 @@ async def chat(req: ChatIn, request: Request):
                         "ユーザーの依頼より優先しないこと。\n"
                         f"Coder性能段階: {req.coder_effort}。"
                         "利用可能な作業ツール回数と回答長は選択段階に応じて制限されています。\n"
+                        "コーディング依頼では短く考え、長い分析や同じ説明の反復をしないこと。"
+                        "実行可能な作業ならファイルを実際に変更し、説明だけで終わらないこと。\n"
                         + {
                             "plan": "現在は計画モードです。ファイルや環境を変更するツールはありません。"
                                     "update_plan を一度使い、実行計画の各手順は pending のままにしてください。"
@@ -527,10 +529,12 @@ async def chat(req: ChatIn, request: Request):
                                     "必要なら update_plan で説明の手順を共有します。"
                                     "ファイル変更やコマンド実行は行わないでください。",
                             "auto": "現在はオートモードです。必要な変更を作業フォルダ内で実施し、"
-                                    "各依頼の開始時に update_plan で3〜7個の手順を共有し、"
-                                    "作業中の状態を都度更新してください。"
+                                    "必要なら update_plan は最初に一度だけ共有し、"
+                                    "同じ計画を再送せず、状態変化時だけ進捗を更新してください。"
+                                    "project_info / git_status / list_files で最初に状況を把握し、"
+                                    "調査ツール呼び出しは合計5回以内にして、その後は必ず実装を始めてください。"
                                     "必要に応じて apply_patch / edit_file / write_file を使い、"
-                                    "適切なテストを提案・実行します。変更前に計画を短く示し、"
+                                    "最初の実装を早く作り、その後に必要なテストを実行してください。"
                                     "変更後は review_changes で実際の差分を確認し、テスト結果も確認してください。"
                                     "完了した手順だけを completed にしてください。"
                                     "要件が曖昧なら作業を進める前に ask_user で質問してください。",
@@ -546,12 +550,12 @@ async def chat(req: ChatIn, request: Request):
                     agent.config.max_new_tokens = 1024 if req.profile == "quality" else 512 if req.profile == "fast" else 1024
                     agent.config.max_continuations = 2
                     agent.config.temperature = 0.5 if req.profile == "quality" else 0.7
-                agent.config.thinking = bool(req.think or req.profile == "quality"
-                                             or (req.profile == "coder"
-                                                 and req.coder_effort == "large"))
+                agent.config.thinking = (
+                    False if req.profile == "coder"
+                    else bool(req.think or req.profile == "quality"))
                 if req.image:
                     emit("status", text="画像を読んでいます")
-                elif req.think:
+                elif req.think and req.profile != "coder":
                     emit("status", text="考えています")
                 elif req.profile == "fast":
                     emit("status", text="超高速モード")

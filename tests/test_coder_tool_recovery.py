@@ -103,6 +103,33 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
         self.assertEqual(answer, "完了しました。")
         self.assertFalse(engine.config.stream)
 
+    def test_plan_is_not_recreated_or_regressed(self):
+        published = []
+        self.coder_tools.on_plan = lambda tasks: published.append(tasks)
+        initial = '[{"step":"ゲームを作る","status":"in_progress"}]'
+        self.coder_tools.update_plan(initial)
+
+        repeated = self.coder_tools.update_plan(
+            '[{"step":"設計から再確認してゲームを作る","status":"pending"}]')
+
+        self.assertIn("維持", repeated)
+        self.assertEqual(len(published), 1)
+        self.assertEqual(self.coder_tools._plan, [
+            {"step": "ゲームを作る", "status": "in_progress"},
+        ])
+
+    def test_auto_mode_bounds_read_only_inspection(self):
+        for _ in range(5):
+            self.coder_tools.registry().get("list_files").run(".")
+
+        Path(self.temp_dir.name, "new-file.txt").write_text("now exists", encoding="utf-8")
+        result = self.coder_tools.registry().get("list_files").run(".")
+
+        self.assertTrue(result.startswith("調査上限:"))
+        self.assertNotIn("new-file.txt", result)
+        guidance = self.agent._tool_result_prompt(result, "list_files")
+        self.assertIn("実装を開始", guidance)
+
 
 if __name__ == "__main__":
     unittest.main()

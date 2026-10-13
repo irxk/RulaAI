@@ -27,6 +27,8 @@ _PROJECT_FILES = (
     "Cargo.toml", "go.mod", "requirements.txt", "composer.json", "pom.xml",
     "build.gradle", "CMakeLists.txt",
 )
+_MAX_AUTO_INSPECTIONS = 5
+_PLAN_STATUS_RANK = {"pending": 0, "in_progress": 1, "completed": 2}
 
 
 class CoderTools:
@@ -39,6 +41,7 @@ class CoderTools:
         self.on_plan: Callable[[list[dict[str, str]]], None] | None = None
         self._originals: dict[str, str | None] = {}
         self._plan: list[dict[str, str]] = []
+        self._inspection_count = 0
 
     def _path(self, relative: str) -> Path:
         candidate = (self.workspace / relative).resolve()
@@ -54,13 +57,15 @@ class CoderTools:
         registry = default_registry()
         registry.register(Tool(
             "list_files", "作業フォルダ内のファイル一覧を取得する",
-            "相対パス (例: . または src)", self.list_files))
+            "相対パス (例: . または src)",
+            lambda argument: self._inspect(self.list_files, argument)))
         registry.register(Tool(
             "read_file", "作業フォルダ内のテキストファイルを読む",
-            "相対ファイルパス または 相対ファイルパス :: 開始行 :: 終了行", self.read_file))
+            "相対ファイルパス または 相対ファイルパス :: 開始行 :: 終了行",
+            lambda argument: self._inspect(self.read_file, argument)))
         registry.register(Tool(
             "search_code", "作業フォルダ内のソースコードから文字列を検索する",
-            "検索文字列", self.search_code))
+            "検索文字列", lambda argument: self._inspect(self.search_code, argument)))
         registry.register(Tool(
             "project_info", "プロジェクト構成・開発指示・変更状態を確認する",
             "引数なし", self.project_info))
@@ -71,10 +76,11 @@ class CoderTools:
             self.update_plan))
         registry.register(Tool(
             "git_status", "Gitの変更状態を確認する (読み取り専用)",
-            "引数なし", self.git_status))
+            "引数なし", lambda argument: self._inspect(self.git_status, argument)))
         registry.register(Tool(
             "git_diff", "Gitの追跡対象ファイルの差分を確認する (読み取り専用)",
-            "任意の作業フォルダ相対パス", self.git_diff))
+            "任意の作業フォルダ相対パス",
+            lambda argument: self._inspect(self.git_diff, argument)))
         registry.register(Tool(
             "ask_user", "要件が曖昧で作業を続けられないときにユーザーへ質問する",
             "質問文", self.ask_user))
@@ -95,6 +101,15 @@ class CoderTools:
                 "run_command", "承認を得て作業フォルダ内でコマンドを実行する",
                 "実行するコマンド", self.run_command))
         return registry
+
+    def _inspect(self, operation: Callable[[str], str], argument: str) -> str:
+        if self.mode == "auto":
+            if self._inspection_count >= _MAX_AUTO_INSPECTIONS:
+                return ("調査上限: 必要な範囲の確認は済んでいます。"
+                        "追加の読み取りをせず、確認済みの内容から最小の動く実装を"
+                        "write_file / edit_file / apply_patch で今すぐ作成してください。")
+            self._inspection_count += 1
+        return operation(argument)
 
     def list_files(self, relative: str) -> str:
         folder = self._path(relative or ".")
@@ -227,10 +242,34 @@ class CoderTools:
             if status not in ("pending", "in_progress", "completed"):
                 return "status は pending / in_progress / completed のいずれかです。"
             tasks.append({"step": step.strip(), "status": status})
+
+        if self._plan:
+            incoming_by_step = {
+                re.sub(r"\s+", " ", task["step"]).strip().casefold(): task
+                for task in tasks
+            }
+            next_plan = [task.copy() for task in self._plan]
+            changed = False
+            for task in next_plan:
+                key = re.sub(r"\s+", " ", task["step"]).strip().casefold()
+                incoming = incoming_by_step.get(key)
+                if incoming is None:
+                    continue
+                old_status = task["status"]
+                new_status = incoming["status"]
+                if _PLAN_STATUS_RANK[new_status] > _PLAN_STATUS_RANK[old_status]:
+                    task["status"] = new_status
+                    changed = True
+            if not changed:
+                return ("既存の作業計画を維持しました。手順の作り直しや追加は不要です。"
+                        "現在の計画に沿ってファイルを実装してください。")
+            tasks = next_plan
+
         self._plan = tasks
         if self.on_plan is not None:
             self.on_plan([task.copy() for task in tasks])
-        return "作業計画をユーザーに共有しました。現在の状態に合わせて更新してください。"
+        return ("作業計画を共有しました。計画の再作成は不要です。"
+                "現在の手順の実作業を続け、状態が実際に変わったときだけ更新してください。")
 
     def git_status(self, argument: str = "") -> str:
         if argument.strip():

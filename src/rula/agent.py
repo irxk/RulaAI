@@ -892,6 +892,17 @@ class Agent:
             "review_changes", "run_command",
         }
         if tool in coder_tools:
+            if result.startswith("調査上限:"):
+                return (f"{result}\n"
+                        "計画や追加調査を行わず、このターン中に実装を開始してください。"
+                        "現状の情報で最小の動く変更をファイルへ保存してください。")
+            if tool == "update_plan" and result.startswith("既存の作業計画を維持しました"):
+                return (f"{result}\n"
+                        "同じ計画を再送せず、次の実装操作を一度実行してください。")
+            if tool == "update_plan" and result.startswith("作業計画を共有しました"):
+                return (f"{result}\n"
+                        "計画の再送は不要です。まず作業フォルダを確認し、"
+                        "手順を読み直さずに実装へ進んでください。")
             if tool == "update_plan" and result.startswith(
                     ("計画のJSONが不正", "計画は", "各項目", "status は", "計画がありません")):
                 return ("作業計画を更新できませんでした。"
