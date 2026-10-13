@@ -274,9 +274,18 @@ def select_workspace(request: Request):
         raise HTTPException(501, "この環境ではフォルダ選択ダイアログを利用できません。")
     script = (
         "Add-Type -AssemblyName System.Windows.Forms; "
+        "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; "
+        "public static class RulaDialogActivation { "
+        "[DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr hWnd, "
+        "IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint flags); "
+        "[DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr hWnd); }'; "
         "$d = New-Object System.Windows.Forms.FolderBrowserDialog; "
         "$d.Description = 'Rula Coder が操作する作業フォルダを選択'; "
         "$d.ShowNewFolderButton = $false; "
+        "$timer = New-Object System.Windows.Forms.Timer; $timer.Interval = 250; "
+        "$timer.add_Tick({ $timer.Stop(); "
+        "[void][RulaDialogActivation]::SetWindowPos($d.Handle, [IntPtr](-1), 0, 0, 0, 0, 0x43); "
+        "[void][RulaDialogActivation]::SetForegroundWindow($d.Handle) }); $timer.Start(); "
         "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) "
         "{ [Console]::WriteLine($d.SelectedPath) }"
     )
