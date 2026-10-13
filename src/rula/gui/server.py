@@ -461,6 +461,12 @@ async def chat(req: ChatIn, request: Request):
                     "status", text=f"{_TOOL_LABELS.get(name, name)}: {arg[:60]}"
                     if name in ("search", "deep_search", "smart_search")
                     else _TOOL_LABELS.get(name, name))
+                # Coder generations contain tool arguments (including entire
+                # source files). Never echo partial model output to the chat;
+                # show the completed answer, while plan/status/thinking events
+                # remain available as separate UI elements.
+                agent.config.stream = req.profile != "coder"
+                agent.config.preview = req.profile != "coder"
                 agent.tools = coder_tools.registry() if coder_tools else default_registry()
                 if coder_tools:
                     coder_tools.on_plan = lambda tasks: (

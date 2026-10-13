@@ -13,6 +13,16 @@ from rula.agent import Agent, AgentConfig, Trace
 from rula.tools.coder import CoderTools
 
 
+class CaptureEngine:
+    display_name = "test"
+    supports_thinking = False
+    hit_token_limit = False
+
+    def generate(self, _messages, config):
+        self.config = config
+        return "完了しました。"
+
+
 class ToolProtocolRecoveryTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -78,6 +88,20 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
         self.assertIn("更新できませんでした", prompt)
         self.assertIn("JSON配列", prompt)
         self.assertNotIn("共有されました", prompt)
+
+    def test_disabled_streaming_never_echoes_partial_tool_source(self):
+        engine = CaptureEngine()
+        agent = Agent(
+            engine=engine,
+            config=AgentConfig(
+                stream=False, preview=False, use_vision=False,
+            ),
+        )
+
+        answer = agent._generate([], stream=True)
+
+        self.assertEqual(answer, "完了しました。")
+        self.assertFalse(engine.config.stream)
 
 
 if __name__ == "__main__":
