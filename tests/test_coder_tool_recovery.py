@@ -379,6 +379,39 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
         self.assertEqual(answer, "index.html を作成しました。")
         self.assertTrue(any("実装を要求" in message for message in progress))
 
+    def test_auto_coding_recognizes_copy_request_and_writes_original_site(self):
+        self.agent.config.coder_auto = True
+        request = ("じゃあ、Netflixという有名サービスの、Webサイトをパクって、"
+                   "演出から、UIまで、全部パクって。")
+        self.assertTrue(self.agent._is_coder_action_request(request))
+        self.agent._turn_text = request
+        trace = Trace(tool_calls=[("search", "Netflix brand guidelines", "検索結果")])
+        outputs = iter([
+            "検索結果に基づく構成案とHTMLコードを以下に示します。",
+            ("<tool>write_file: index.html :: <!doctype html>"
+             "<title>Streamly</title><main>オリジナル動画サービス</main></tool>"),
+            "オリジナルの動画サービスサイトを作業フォルダに保存しました。",
+        ])
+        prompts = []
+
+        def generate(scratch, **_kwargs):
+            prompts.append([dict(message) for message in scratch])
+            return next(outputs)
+
+        self.agent._generate = generate
+        answer = self.agent._answer_or_tool([], trace)
+
+        self.assertEqual(
+            Path(self.temp_dir.name, "index.html").read_text(encoding="utf-8"),
+            "<!doctype html><title>Streamly</title>"
+            "<main>オリジナル動画サービス</main>",
+        )
+        self.assertEqual([name for name, _, _ in trace.tool_calls],
+                         ["search", "write_file"])
+        self.assertEqual(answer, "オリジナルの動画サービスサイトを作業フォルダに保存しました。")
+        self.assertTrue(any("write_file" in message["content"]
+                            for messages in prompts for message in messages))
+
     def test_auto_coding_recovers_after_project_info_and_two_prose_replies(self):
         self.agent.config.coder_auto = True
         trace = Trace()
