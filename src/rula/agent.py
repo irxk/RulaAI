@@ -171,6 +171,8 @@ class AgentConfig:
     max_new_tokens: int = 1024
     # How many times to continue an answer that ran into the token limit.
     max_continuations: int = 3
+    # Bound native reasoning separately from the answer/tool-call token budget.
+    think_cap: int | None = None
     stream: bool = False  # print the final answer as it is generated
     # For a screen that can replace what it showed (the desktop app): every pass
     # streams, not only grounded ones, and the quality rewrites still run — the
@@ -672,7 +674,7 @@ class Agent:
                         think=self._native_thinking if think is None else think,
                         on_token=self._reasoning_sink(),
                         abort_check=sm.feed if sm else None,
-                        think_cap=self._think_cap)
+                        think_cap=self._think_cap or self.config.think_cap)
         start = time.perf_counter()
         text = self.engine.generate(self._messages(scratch), cfg)
         self._steps.append((sys._getframe(1).f_code.co_name,

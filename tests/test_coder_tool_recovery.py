@@ -104,6 +104,23 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
         self.assertEqual(answer, "完了しました。")
         self.assertFalse(engine.config.stream)
 
+    def test_native_coder_reasoning_uses_separate_bounded_budget(self):
+        engine = CaptureEngine()
+        engine.supports_thinking = True
+        agent = Agent(
+            engine=engine,
+            config=AgentConfig(
+                thinking=True, think_cap=2000, max_new_tokens=4096,
+                use_vision=False,
+            ),
+        )
+
+        agent._generate([])
+
+        self.assertTrue(engine.config.think)
+        self.assertEqual(engine.config.max_new_tokens, 4096)
+        self.assertEqual(engine.config.think_cap, 2000)
+
     def test_plan_is_not_recreated_or_regressed(self):
         published = []
         self.coder_tools.on_plan = lambda tasks: published.append(tasks)

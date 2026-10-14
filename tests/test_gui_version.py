@@ -17,6 +17,15 @@ from rula.version import __version__
 
 
 class GuiVersionTests(unittest.TestCase):
+    def test_only_large_coder_effort_enables_supported_native_reasoning(self):
+        engine = SimpleNamespace(supports_thinking=True)
+
+        self.assertTrue(server._coder_thinking_enabled("large", engine))
+        self.assertFalse(server._coder_thinking_enabled("medium", engine))
+        self.assertFalse(
+            server._coder_thinking_enabled(
+                "large", SimpleNamespace(supports_thinking=False)))
+
     def test_info_endpoint_reports_application_version(self):
         state = {
             "token": "test-token",

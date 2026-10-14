@@ -60,6 +60,10 @@ class PendingInteraction:
     response: str | None = None
 
 
+def _coder_thinking_enabled(effort: str, engine: object) -> bool:
+    return effort == "large" and bool(getattr(engine, "supports_thinking", False))
+
+
 def _tool_words() -> list[str]:
     from ..tools.base import ALIASES
     coder_tool_words = {
@@ -652,8 +656,12 @@ async def chat(req: ChatIn, request: Request):
                     agent.config.max_continuations = 2
                     agent.config.temperature = 0.5 if req.profile == "quality" else 0.7
                 agent.config.thinking = (
-                    False if req.profile == "coder"
+                    _coder_thinking_enabled(req.coder_effort, agent.engine)
+                    if req.profile == "coder"
                     else bool(req.think or req.profile == "quality"))
+                agent.config.think_cap = (
+                    2000 if req.profile == "coder" and req.coder_effort == "large"
+                    else None)
                 if req.image:
                     emit("status", text="画像を読んでいます")
                 elif req.think and req.profile != "coder":
