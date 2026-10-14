@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import stat
 import subprocess
 import tempfile
 from difflib import unified_diff
@@ -15,6 +16,8 @@ _SKIP_DIRS = {
     "dist", "build", "coverage",
 }
 _MAX_FILE_BYTES = 100_000
+_MAX_PATCH_FILES = 20
+_MAX_PATCH_BYTES = 1_000_000
 _MAX_OUTPUT_CHARS = 20_000
 _TEXT_SUFFIXES = {
     ".c", ".cc", ".cfg", ".cpp", ".cs", ".css", ".go", ".h", ".hpp", ".html",
@@ -44,6 +47,8 @@ class CoderTools:
         self._inspection_count = 0
 
     def _path(self, relative: str) -> Path:
+        if "\0" in relative:
+            raise ValueError("ファイルパスに無効な文字が含まれています。")
         candidate = (self.workspace / relative).resolve()
         try:
             candidate.relative_to(self.workspace)
@@ -112,7 +117,10 @@ class CoderTools:
         return operation(argument)
 
     def list_files(self, relative: str) -> str:
-        folder = self._path(relative or ".")
+        try:
+            folder = self._path(relative or ".")
+        except ValueError as exc:
+            return str(exc)
         if not folder.is_dir():
             return f"フォルダが見つかりません: {relative}"
         found: list[str] = []
@@ -139,12 +147,18 @@ class CoderTools:
                 return "行番号は整数で指定してください。"
             if start_line < 1 or end_line < start_line:
                 return "行番号の範囲が正しくありません。"
-        path = self._path(path_arg.strip())
+        try:
+            path = self._path(path_arg.strip())
+        except ValueError as exc:
+            return str(exc)
         if not path.is_file():
             return f"ファイルが見つかりません: {path_arg}"
         if path.stat().st_size > _MAX_FILE_BYTES:
             return f"ファイルが大きすぎるため読めません (上限 {_MAX_FILE_BYTES} bytes): {path_arg}"
-        content = path.read_text(encoding="utf-8")
+        try:
+            content = self._read_text(path)
+        except (OSError, UnicodeError) as exc:
+            return f"ファイルを読めません ({path_arg}): {exc}"
         if end_line is None:
             return content
         lines = content.splitlines()
@@ -186,6 +200,9 @@ class CoderTools:
         return "\n".join(matches) or "該当箇所はありません。"
 
     def project_info(self, argument: str = "") -> str:
+        return self._inspect(self._project_info, argument)
+
+    def _project_info(self, argument: str = "") -> str:
         if argument.strip():
             return "このツールに引数は不要です。"
         parts = [f"作業フォルダ: {self.workspace}"]
@@ -208,7 +225,7 @@ class CoderTools:
                 continue
             if path.is_file() and path.stat().st_size <= _MAX_FILE_BYTES:
                 try:
-                    text = path.read_text(encoding="utf-8").strip()
+                    text = self._read_text(path).strip()
                 except (OSError, UnicodeError):
                     continue
                 section = f"\n--- {name} ---\n{text[:min(4000, remaining)]}"
@@ -232,6 +249,7 @@ class CoderTools:
         if not isinstance(data, list) or not 1 <= len(data) <= 12:
             return "計画は1〜12項目のJSON配列で指定してください。"
         tasks: list[dict[str, str]] = []
+        seen_steps: set[str] = set()
         for item in data:
             if not isinstance(item, dict):
                 return "各項目は step と status を持つJSONオブジェクトにしてください。"
@@ -241,6 +259,10 @@ class CoderTools:
                 return "各項目の step は1〜240文字の文字列にしてください。"
             if status not in ("pending", "in_progress", "completed"):
                 return "status は pending / in_progress / completed のいずれかです。"
+            normalized = re.sub(r"\s+", " ", step).strip().casefold()
+            if normalized in seen_steps:
+                return "計画に同じ手順が重複しています。手順を一度だけ指定してください。"
+            seen_steps.add(normalized)
             tasks.append({"step": step.strip(), "status": status})
 
         if self._plan:
@@ -291,6 +313,7 @@ class CoderTools:
             result = subprocess.run(
                 ["git", "-C", str(self.workspace), *args],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                encoding="utf-8", errors="replace",
                 timeout=15, check=False,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except FileNotFoundError:
@@ -310,40 +333,36 @@ class CoderTools:
         relative, separator, content = argument.partition(" :: ")
         if not separator:
             return "形式エラー: 相対パス :: ファイル全文 の形式で指定してください。"
-        if len(content.encode("utf-8")) > _MAX_FILE_BYTES:
-            return f"新しい内容が大きすぎるため保存を中止しました (上限 {_MAX_FILE_BYTES} bytes)。"
-        path = self._path(relative.strip())
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists() and path.is_dir():
-            return f"ファイルではなくフォルダです: {relative}"
-        if path.exists() and path.stat().st_size > _MAX_FILE_BYTES:
-            return f"既存ファイルが大きすぎるため上書きを中止しました: {relative}"
-        rel_path = path.relative_to(self.workspace).as_posix()
-        if rel_path not in self._originals:
-            self._originals[rel_path] = (
-                path.read_text(encoding="utf-8") if path.is_file() else None)
-        with tempfile.NamedTemporaryFile(
-                "w", encoding="utf-8", newline="", dir=path.parent,
-                prefix=f".{path.name}.", suffix=".tmp", delete=False) as stream:
-            temporary = Path(stream.name)
-            stream.write(content)
         try:
-            os.replace(temporary, path)
-        finally:
-            temporary.unlink(missing_ok=True)
-        return f"保存しました: {path.relative_to(self.workspace).as_posix()}"
+            content_size = len(content.encode("utf-8"))
+        except UnicodeError as exc:
+            return f"ファイルにUTF-8として保存できない文字が含まれています: {exc}"
+        if content_size > _MAX_FILE_BYTES:
+            return f"新しい内容が大きすぎるため保存を中止しました (上限 {_MAX_FILE_BYTES} bytes)。"
+        try:
+            path = self._write_path(relative.strip())
+        except ValueError as exc:
+            return str(exc)
+        return self._write_files([(path, content)])
 
     def edit_file(self, argument: str) -> str:
         parts = argument.split(" :: ", 2)
         if len(parts) != 3:
             return "形式エラー: 相対パス :: 置換前 :: 置換後 の形式で指定してください。"
         relative, old, new = parts
-        path = self._path(relative.strip())
+        try:
+            path = self._path(relative.strip())
+        except ValueError as exc:
+            return str(exc)
         if not path.is_file():
             return f"ファイルが見つかりません: {relative}"
         if path.stat().st_size > _MAX_FILE_BYTES:
             return f"ファイルが大きすぎるため編集を中止しました: {relative}"
-        original = path.read_text(encoding="utf-8")
+        try:
+            original = self._read_text(path)
+        except (OSError, UnicodeError) as exc:
+            return f"ファイルを読めません ({relative}): {exc}"
+        original, old, new = self._match_newlines(original, old, new)
         occurrences = original.count(old)
         if occurrences != 1:
             return f"置換を中止しました: 対象文字列は {occurrences} 件です (一意な場合のみ変更します)。"
@@ -354,38 +373,173 @@ class CoderTools:
         blocks = re.split(r"(?m)^@@ ([^\r\n]+)\r?\n", patch)
         if len(blocks) < 3 or len(blocks) % 2 == 0:
             return "パッチ形式エラー: @@ 相対パス の行でファイルごとに区切ってください。"
+        if (len(blocks) - 1) // 2 > _MAX_PATCH_FILES:
+            return f"パッチは最大 {_MAX_PATCH_FILES} ファイルまでです。"
+        try:
+            patch_size = len(patch.encode("utf-8"))
+        except UnicodeError as exc:
+            return f"パッチにUTF-8として保存できない文字が含まれています: {exc}"
+        if patch_size > _MAX_PATCH_BYTES:
+            return f"パッチが大きすぎるため適用を中止しました (上限 {_MAX_PATCH_BYTES} bytes)。"
         changes: list[tuple[Path, str]] = []
         seen_paths: set[Path] = set()
         for index in range(1, len(blocks), 2):
-            path = self._path(blocks[index].strip())
+            try:
+                path = self._write_path(blocks[index].strip())
+            except ValueError as exc:
+                return str(exc)
             if path in seen_paths:
                 return f"パッチ形式エラー: ファイルを重複指定しています: {blocks[index]}"
             seen_paths.add(path)
-            body = blocks[index + 1].strip("\r\n")
+            body = blocks[index + 1].replace("\r\n", "\n").strip("\n")
             old, separator, new = body.partition("\n+++ ")
             if not separator or not old.startswith("--- "):
                 return f"パッチ形式エラー ({blocks[index]}): --- 旧内容 と +++ 新内容 が必要です。"
             old = old[4:]
-            new = new[4:]
             if not path.is_file():
                 return f"ファイルが見つかりません: {blocks[index]}"
             if path.stat().st_size > _MAX_FILE_BYTES:
                 return f"ファイルが大きすぎるため編集を中止しました: {blocks[index]}"
             try:
-                original = path.read_text(encoding="utf-8")
+                original = self._read_text(path)
             except (OSError, UnicodeError) as exc:
                 return f"ファイルを読めません ({blocks[index]}): {exc}"
+            original, old, new = self._match_newlines(original, old, new)
             if original.count(old) != 1:
                 return (f"適用を中止しました ({blocks[index]}): 旧内容は"
                         f" {original.count(old)} 件一致しました。一意な場合のみ変更します。")
             changes.append((path, original.replace(old, new, 1)))
-        for path, updated in changes:
-            relative = path.relative_to(self.workspace).as_posix()
-            result = self.write_file(f"{relative} :: {updated}")
-            if not result.startswith("保存しました:"):
-                return result
+        result = self._write_files(changes)
+        if result.startswith("変更なし:") or not result.startswith("保存しました:"):
+            return result
         return "変更しました: " + ", ".join(
             path.relative_to(self.workspace).as_posix() for path, _ in changes)
+
+    def _read_text(self, path: Path) -> str:
+        return path.read_bytes().decode("utf-8")
+
+    @staticmethod
+    def _match_newlines(original: str, old: str, new: str) -> tuple[str, str, str]:
+        if original.count(old):
+            return original, old, new
+        normalized_original = original.replace("\r\n", "\n").replace("\r", "\n")
+        normalized_old = old.replace("\r\n", "\n").replace("\r", "\n")
+        normalized_new = new.replace("\r\n", "\n").replace("\r", "\n")
+        return normalized_original, normalized_old, normalized_new
+
+    def _write_path(self, relative: str) -> Path:
+        requested = Path(relative)
+        if "\0" in relative:
+            raise ValueError("ファイルパスに無効な文字が含まれています。")
+        if not relative or requested.is_absolute() or requested.drive:
+            raise ValueError("作業フォルダ内の相対ファイルパスを指定してください。")
+        lexical = Path(os.path.abspath(self.workspace / requested))
+        try:
+            parts = lexical.relative_to(self.workspace).parts
+        except ValueError as exc:
+            raise ValueError("作業フォルダの外は操作できません。") from exc
+        current = self.workspace
+        for part in parts:
+            current = current / part
+            if current.is_symlink():
+                raise ValueError("シンボリックリンク経由の書き込みはできません。")
+        return self._path(relative)
+
+    def _write_files(self, changes: list[tuple[Path, str]]) -> str:
+        prepared: list[tuple[Path, str, bytes, bytes | None]] = []
+        originals: dict[str, str | None] = {}
+        total_bytes = 0
+        for path, content in changes:
+            if path.exists() and not path.is_file():
+                return f"ファイルではなくフォルダです: {path.relative_to(self.workspace).as_posix()}"
+            try:
+                original_bytes = path.read_bytes() if path.exists() else None
+                original = original_bytes.decode("utf-8") if original_bytes is not None else None
+            except (OSError, UnicodeError) as exc:
+                return f"既存ファイルを安全に読めないため保存を中止しました ({path}): {exc}"
+            if original_bytes is not None and len(original_bytes) > _MAX_FILE_BYTES:
+                return f"既存ファイルが大きすぎるため上書きを中止しました: {path.name}"
+            if original is not None:
+                content = self._preserve_newlines(content, original)
+            try:
+                encoded = content.encode("utf-8")
+            except UnicodeError as exc:
+                return f"ファイルにUTF-8として保存できない文字が含まれています: {exc}"
+            if len(encoded) > _MAX_FILE_BYTES:
+                return f"新しい内容が大きすぎるため保存を中止しました (上限 {_MAX_FILE_BYTES} bytes)。"
+            total_bytes += len(encoded)
+            originals[path.relative_to(self.workspace).as_posix()] = original
+            if original_bytes != encoded:
+                prepared.append((path, content, encoded, original_bytes))
+        if total_bytes > _MAX_PATCH_BYTES:
+            return f"変更内容が大きすぎるため保存を中止しました (上限 {_MAX_PATCH_BYTES} bytes)。"
+        if not prepared:
+            return "変更なし: 指定内容はすでに保存されています。"
+
+        staged: list[tuple[Path, Path, Path | None]] = []
+        temporary_files: list[Path] = []
+        replaced: list[tuple[Path, Path | None]] = []
+        try:
+            for path, _, encoded, original_bytes in prepared:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile(
+                        "wb", dir=path.parent, prefix=f".{path.name}.",
+                        suffix=".tmp", delete=False) as stream:
+                    new_temp = Path(stream.name)
+                    temporary_files.append(new_temp)
+                    stream.write(encoded)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                if original_bytes is not None and os.name != "nt":
+                    os.chmod(new_temp, stat.S_IMODE(path.stat().st_mode))
+                old_temp = None
+                if original_bytes is not None:
+                    with tempfile.NamedTemporaryFile(
+                            "wb", dir=path.parent, prefix=f".{path.name}.",
+                            suffix=".bak", delete=False) as stream:
+                        old_temp = Path(stream.name)
+                        temporary_files.append(old_temp)
+                        stream.write(original_bytes)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    if os.name != "nt":
+                        os.chmod(old_temp, stat.S_IMODE(path.stat().st_mode))
+                staged.append((path, new_temp, old_temp))
+            for path, new_temp, old_temp in staged:
+                os.replace(new_temp, path)
+                replaced.append((path, old_temp))
+        except OSError as exc:
+            rollback_errors: list[str] = []
+            for path, old_temp in reversed(replaced):
+                try:
+                    if old_temp is None:
+                        path.unlink(missing_ok=True)
+                    else:
+                        os.replace(old_temp, path)
+                except OSError as rollback_exc:
+                    rollback_errors.append(f"{path.name}: {rollback_exc}")
+            message = f"保存に失敗しました。変更をロールバックしました: {exc}"
+            if rollback_errors:
+                message = ("保存に失敗し、一部のロールバックも失敗しました: "
+                           + "; ".join(rollback_errors))
+            return message
+        finally:
+            for temporary in temporary_files:
+                temporary.unlink(missing_ok=True)
+
+        for relative, original in originals.items():
+            self._originals.setdefault(relative, original)
+        return "保存しました: " + ", ".join(
+            path.relative_to(self.workspace).as_posix() for path, _, _, _ in prepared)
+
+    @staticmethod
+    def _preserve_newlines(content: str, original: str) -> str:
+        crlf = original.count("\r\n")
+        lf = original.count("\n") - crlf
+        if crlf <= lf:
+            return content
+        normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+        return normalized.replace("\n", "\r\n")
 
     def review_changes(self, argument: str = "") -> str:
         if argument.strip():
@@ -395,7 +549,7 @@ class CoderTools:
         diffs: list[str] = []
         remaining = _MAX_OUTPUT_CHARS
         for relative, original in self._originals.items():
-            current = self._path(relative).read_text(encoding="utf-8")
+            current = self._read_text(self._path(relative))
             before = original.splitlines(keepends=True) if original is not None else []
             after = current.splitlines(keepends=True)
             diff = "".join(unified_diff(
@@ -418,7 +572,7 @@ class CoderTools:
                 if original is not None:
                     changed.append(relative)
                 continue
-            if path.read_text(encoding="utf-8") != original:
+            if self._read_text(path) != original:
                 changed.append(relative)
         return sorted(changed)
 
@@ -427,12 +581,15 @@ class CoderTools:
             return "コマンドを実行できません: ユーザー承認が利用できません。"
         if not command.strip():
             return "コマンドが空です。"
+        if len(command) > 4000:
+            return "コマンドが長すぎるため実行を中止しました (上限 4,000文字)。"
         approved = self.interact("command", command=command)
         if approved != "approved":
             return "ユーザーがコマンドを拒否しました。変更を加えずに続行してください。"
         try:
             result = subprocess.run(
                 command, cwd=self.workspace, shell=True, text=True,
+                encoding="utf-8", errors="replace",
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120,
                 check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except subprocess.TimeoutExpired as exc:
@@ -440,5 +597,7 @@ class CoderTools:
             if isinstance(output, bytes):
                 output = output.decode(errors="replace")
             return f"コマンドは120秒でタイムアウトしました。\n{output[-_MAX_OUTPUT_CHARS:]}"
+        except OSError as exc:
+            return f"コマンドを起動できませんでした: {exc}"
         output = result.stdout[-_MAX_OUTPUT_CHARS:]
         return f"終了コード: {result.returncode}\n{output or '(出力なし)'}"

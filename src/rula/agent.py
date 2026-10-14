@@ -784,7 +784,12 @@ class Agent:
         """Generate once and reuse that text as the answer unless it turned out to be
         a tool request. Probing for tools with a separate throwaway generation would
         double the latency of every ordinary turn."""
-        for _ in range(max(0, self.config.max_tool_calls)):
+        previous_call = (
+            (trace.tool_calls[-1][0], trace.tool_calls[-1][1])
+            if trace.tool_calls else None)
+        repeated_call_count = 1 if previous_call is not None else 0
+        remaining_calls = max(0, self.config.max_tool_calls - len(trace.tool_calls))
+        for _ in range(remaining_calls):
             # Once material has been gathered this pass is the answer itself, and a
             # long write-up is worth streaming. Before that the output might turn out
             # to be a tool request, which the user should not see.
@@ -801,6 +806,20 @@ class Agent:
             if call is None:
                 trace.streamed = grounded and self._echoes
                 return text
+            if call == previous_call:
+                repeated_call_count += 1
+                if repeated_call_count >= 2:
+                    trace.streamed = False
+                    return ("同じツール操作が繰り返されたため、ループを停止しました。"
+                            "実行済みの変更を確認し、残りの作業を明示してください。")
+                scratch.append({
+                    "role": "user",
+                    "content": ("このツール操作は直前に実行済みです。再実行せず、"
+                                "返された結果を使って別の作業へ進むか回答してください。"),
+                })
+                continue
+            previous_call = call
+            repeated_call_count = 0
             self._use_tool(*call, scratch, trace)
         # A final generation is allowed after the action budget is exhausted, but
         # never execute or display another tool request as if it were an answer.
@@ -845,11 +864,16 @@ class Agent:
         """
         best = ""
         for _ in range(3):
+            calls_before = len(trace.tool_calls)
             generated = self._answer_or_tool(notes, trace)
             _, answer = self._split_thinking(generated.strip())
             answer = answer.strip()
             if len(answer) > len(best):
                 best = answer
+            if len(trace.tool_calls) > calls_before:
+                return answer or (
+                    "作業ツールは実行されましたが、完了内容を回答できませんでした。"
+                    "変更内容を確認してください。")
             if not self._looks_truncated(answer):
                 return answer
         return best
@@ -862,7 +886,7 @@ class Agent:
         if not self.config.use_tools:
             return None
 
-        m = TOOL_CALL_RE.search(text)
+        m = TOOL_CALL_RE.fullmatch(text.strip())
         if m:
             tool = self.tools.get(m.group(1))
             # An explicit tagged request is control flow, even when its arguments
