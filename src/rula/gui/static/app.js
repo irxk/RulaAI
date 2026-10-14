@@ -14,7 +14,8 @@
   const escapeHtml = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
   const state = { chatId: null, busy: false, image: null, thumb: null, think: false, info: null,
-                  workspace: localStorage.getItem("rula-workspace") || "", interaction: null };
+                  workspace: localStorage.getItem("rula-workspace") || "", interaction: null,
+                  autoConfirmedWorkspaces: new Set() };
 
   async function api(path, opts = {}) {
     opts.headers = Object.assign({ "X-Rula-Token": TOKEN }, opts.headers || {});
@@ -207,11 +208,48 @@
     const status = el("div", "status", '<span class="dots"><i></i><i></i><i></i></span><span class="st"></span>');
     const plan = el("div", "work-plan");
     plan.hidden = true;
+    const activity = el("details", "activity-log");
+    activity.hidden = true;
+    activity.append(el("summary", null, "作業ログ"));
+    const activityItems = el("ol", "activity-list");
+    activity.append(activityItems);
     const body = el("div", "body");
-    m.append(status, plan, body);
+    m.append(status, plan, activity, body);
     $("messages").append(m);
     let thinkBox = null;
     let pending = null;
+    const activityRows = new Map();
+
+    const renderActivity = (entry) => {
+      if (!entry || entry.index == null) return;
+      const firstEntry = activity.hidden;
+      activity.hidden = false;
+      if (firstEntry) activity.open = true;
+      let row = activityRows.get(entry.index);
+      if (!row) {
+        row = el("li", "activity-running");
+        activityRows.set(entry.index, row);
+        activityItems.append(row);
+      }
+      row.replaceChildren();
+      const heading = el("span", "activity-heading");
+      heading.textContent = entry.label || entry.name || "作業";
+      row.append(heading);
+      if (entry.detail) {
+        const detail = el("code", "activity-detail");
+        detail.textContent = entry.detail;
+        row.append(detail);
+      }
+      if (entry.result) {
+        const result = el("span", "activity-result");
+        result.textContent = entry.result;
+        row.append(result);
+      } else if (entry.phase === "running") {
+        row.append(el("span", "activity-progress", "実行中"));
+      }
+      row.classList.toggle("activity-complete", entry.phase === "done");
+      scrollToEnd();
+    };
 
     const setThinking = (text, live) => {
       if (!text) return;
@@ -250,6 +288,7 @@
         plan.append(heading, list);
         scrollToEnd();
       },
+      activity(entry) { renderActivity(entry); },
       thinking(text) { setThinking(text, true); scrollToEnd(); },
       stream(text) {
         // Rendered at most once a frame: tokens arrive faster than layout.
@@ -266,6 +305,12 @@
         pending = null;
         status.hidden = true;
         this.plan(ev.coder_plan || ev.plan);
+        if (Array.isArray(ev.activity_log)) {
+          activityRows.clear();
+          activityItems.replaceChildren();
+          activity.hidden = !ev.activity_log.length;
+          for (const entry of ev.activity_log) renderActivity(entry);
+        }
         if (ev.thinking) {
           setThinking(ev.thinking, false);
           thinkBox.open = false;
@@ -392,9 +437,13 @@
       return;
     }
     if (profile === "coder" && coderMode === "auto" &&
-        !window.confirm("オートモードの注意\n\nCoderが選択した作業フォルダ内のファイルを変更します。"
-          + "コマンドを実行するたびに別途確認します。変更を元に戻せない場合があります。\n\n"
-          + "作業フォルダ: " + state.workspace + "\n\n続行しますか？")) return;
+        !state.autoConfirmedWorkspaces.has(state.workspace)) {
+      if (!window.confirm("オートモードの注意\n\nCoderは選択した作業フォルダ内のファイルを変更し、"
+          + "必要なコマンドを個別確認なしで実行します。作業内容は下の作業ログに表示されます。"
+          + "信頼できるプロジェクトだけを選んでください。変更を元に戻せない場合があります。\n\n"
+          + "作業フォルダ: " + state.workspace + "\n\nこの作業フォルダで続行しますか？")) return;
+      state.autoConfirmedWorkspaces.add(state.workspace);
+    }
 
     const image = state.image, thumb = state.thumb;
     addUser(text, thumb);
@@ -420,6 +469,7 @@
         case "token": answer += ev.text; a.stream(answer); break;
         case "reset": answer = ""; break;
         case "interaction": showInteraction(ev); break;
+        case "activity": a.activity(ev.entry); break;
         case "plan": a.plan(ev.tasks); break;
         case "done": a.final(ev); break;
         case "error": a.error(ev.text); break;
@@ -429,6 +479,8 @@
       const r = await post("/api/chat", { chat_id: state.chatId, message: text, image, thumb,
                                           think: state.think, profile, coder_mode: coderMode,
                                           coder_effort: coderEffort,
+                                          auto_approved: profile === "coder" && coderMode === "auto"
+                                            && state.autoConfirmedWorkspaces.has(state.workspace),
                                           workspace: state.workspace || null });
       const reader = r.body.getReader();
       const dec = new TextDecoder();

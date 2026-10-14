@@ -251,13 +251,70 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
         self.assertEqual(len(trace.tool_calls), 1)
         self.assertFalse(Path(self.temp_dir.name, "x.py").exists())
 
-    def test_rejected_command_is_never_started(self):
-        self.coder_tools.interact = lambda *_args, **_kwargs: "rejected"
+    def test_auto_command_requires_one_time_workspace_approval(self):
         with patch("rula.tools.coder.subprocess.run") as run:
             result = self.coder_tools.run_command("echo should-not-run")
 
-        self.assertIn("拒否", result)
+        self.assertIn("開始確認", result)
         run.assert_not_called()
+
+    def test_approved_auto_command_runs_without_an_interaction_prompt(self):
+        self.coder_tools.auto_approved = True
+        with patch("rula.tools.coder.subprocess.run") as run:
+            run.return_value = type("Result", (), {"returncode": 0, "stdout": "ok"})()
+            result = self.coder_tools.run_command("echo ok")
+
+        self.assertIn("終了コード: 0", result)
+        run.assert_called_once()
+        self.assertIsNone(self.coder_tools.interact)
+
+    def test_tool_result_callback_receives_completed_operation(self):
+        completed = []
+        self.agent.on_tool_result = lambda name, arg, result: completed.append(
+            (name, arg, result))
+
+        self.agent._use_tool("write_file", "sample.py :: print('ok')", [], Trace())
+
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0][0:2], ("write_file", "sample.py :: print('ok')"))
+        self.assertTrue(completed[0][2].startswith("保存しました:"))
+
+    def test_auto_coding_request_retries_as_file_tool_after_prose(self):
+        self.agent.config.coder_auto = True
+        outputs = iter([
+            "こちらがHTMLです。\n<html><body>会社サイト</body></html>",
+            "<tool>write_file: index.html :: <!doctype html>\n<html>done</html></tool>",
+            "index.html を作成しました。",
+        ])
+        progress = []
+        self.agent.on_progress = progress.append
+        self.agent._generate = lambda _scratch, **_kwargs: next(outputs)
+        trace = Trace()
+        self.agent._turn_text = "簡単な企業Webサイトを作って。"
+
+        answer = self.agent._answer_or_tool([], trace)
+
+        self.assertEqual(
+            Path(self.temp_dir.name, "index.html").read_text(encoding="utf-8"),
+            "<!doctype html>\n<html>done</html>",
+        )
+        self.assertEqual([tool for tool, _, _ in trace.tool_calls], ["write_file"])
+        self.assertEqual(answer, "index.html を作成しました。")
+        self.assertTrue(any("実装を要求" in message for message in progress))
+
+    def test_auto_coding_request_never_returns_unsaved_source_as_success(self):
+        self.agent.config.coder_auto = True
+        outputs = iter([
+            "```html\n<html>未保存</html>\n```",
+            "```html\n<html>まだ未保存</html>\n```",
+        ])
+        self.agent._generate = lambda _scratch, **_kwargs: next(outputs)
+        self.agent._turn_text = "企業Webサイトを作って"
+
+        answer = self.agent._answer_or_tool([], Trace())
+
+        self.assertIn("まだ作業フォルダへのファイル変更", answer)
+        self.assertNotIn("<html>", answer)
 
     def test_invalid_path_character_is_reported_without_writing(self):
         result = self.coder_tools.write_file("bad\0name.txt :: unsafe")

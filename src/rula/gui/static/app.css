@@ -198,6 +198,18 @@ header {
 .work-plan-in_progress .work-plan-state { color: var(--warn-text); font-weight: 600; }
 .work-plan-completed { color: var(--muted); }
 .work-plan-completed .work-plan-state { color: #258345; }
+.activity-log {
+  margin: 0 0 12px; padding: 8px 12px; border: 1px solid var(--border);
+  border-radius: 10px; background: var(--side); color: var(--muted); font-size: 12px;
+}
+.activity-log summary { cursor: pointer; color: var(--muted); font-weight: 600; }
+.activity-list { display: grid; gap: 5px; margin: 7px 0 0; padding-left: 20px; }
+.activity-list li { padding-left: 2px; overflow-wrap: anywhere; }
+.activity-heading { color: var(--text); }
+.activity-detail { margin-left: 7px; color: var(--faint); overflow-wrap: anywhere; }
+.activity-result { display: block; color: var(--faint); white-space: pre-wrap; }
+.activity-progress { margin-left: 7px; color: var(--warn-text); }
+.activity-complete .activity-heading::after { content: " · 完了"; color: #258345; font-size: 11px; }
 .dots { display: inline-flex; gap: 4px; }
 .dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); animation: pulse 1.2s infinite; }
 .dots i:nth-child(2) { animation-delay: .15s; } .dots i:nth-child(3) { animation-delay: .3s; }

@@ -35,11 +35,12 @@ _PLAN_STATUS_RANK = {"pending": 0, "in_progress": 1, "completed": 2}
 
 
 class CoderTools:
-    def __init__(self, workspace: str, mode: str):
+    def __init__(self, workspace: str, mode: str, auto_approved: bool = False):
         self.workspace = Path(workspace).resolve(strict=True)
         if not self.workspace.is_dir():
             raise ValueError("作業フォルダが見つかりません。")
         self.mode = mode
+        self.auto_approved = auto_approved
         self.interact: Callable[..., str] | None = None
         self.on_plan: Callable[[list[dict[str, str]]], None] | None = None
         self._originals: dict[str, str | None] = {}
@@ -577,15 +578,18 @@ class CoderTools:
         return sorted(changed)
 
     def run_command(self, command: str) -> str:
-        if self.interact is None:
-            return "コマンドを実行できません: ユーザー承認が利用できません。"
         if not command.strip():
             return "コマンドが空です。"
         if len(command) > 4000:
             return "コマンドが長すぎるため実行を中止しました (上限 4,000文字)。"
-        approved = self.interact("command", command=command)
-        if approved != "approved":
-            return "ユーザーがコマンドを拒否しました。変更を加えずに続行してください。"
+        if self.mode == "auto" and not self.auto_approved:
+            return "オートモードの開始確認がないため、コマンドを実行しませんでした。"
+        if self.mode != "auto":
+            if self.interact is None:
+                return "コマンドを実行できません: ユーザー承認が利用できません。"
+            approved = self.interact("command", command=command)
+            if approved != "approved":
+                return "ユーザーがコマンドを拒否しました。変更を加えずに続行してください。"
         try:
             result = subprocess.run(
                 command, cwd=self.workspace, shell=True, text=True,

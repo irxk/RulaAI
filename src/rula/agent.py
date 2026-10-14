@@ -186,6 +186,7 @@ class AgentConfig:
     compress_after: int = 16  # trigger compression after this many turns
     keep_recent: int = 6  # keep this many recent turns verbatim
     extra_system: str | None = None
+    coder_auto: bool = False
 
 
 @dataclass
@@ -245,6 +246,8 @@ class Agent:
         # Called with (tool name, argument) as a tool starts, so a UI can say
         # "検索しています" during the seconds a search takes instead of nothing.
         self.on_tool: "Callable[[str, str], None] | None" = None
+        self.on_tool_result: "Callable[[str, str, str], None] | None" = None
+        self.on_progress: "Callable[[str], None] | None" = None
 
     @property
     def vision(self):
@@ -778,6 +781,11 @@ class Agent:
             result = self._run_tool(name, arg)
             prompt = self._tool_result_prompt(result, name)
         trace.tool_calls.append((name, arg, result))
+        if self.on_tool_result is not None:
+            try:
+                self.on_tool_result(name, arg, result)
+            except Exception:
+                pass
         scratch.append({"role": "user", "content": prompt})
 
     def _answer_or_tool(self, scratch: list[dict], trace: Trace) -> str:
@@ -789,11 +797,16 @@ class Agent:
             if trace.tool_calls else None)
         repeated_call_count = 1 if previous_call is not None else 0
         remaining_calls = max(0, self.config.max_tool_calls - len(trace.tool_calls))
+        implementation_nudge_used = False
         for _ in range(remaining_calls):
             # Once material has been gathered this pass is the answer itself, and a
             # long write-up is worth streaming. Before that the output might turn out
             # to be a tool request, which the user should not see.
             grounded = bool(trace.tool_calls)
+            if self.on_progress is not None:
+                self.on_progress(
+                    "調査結果を整理し、必要な変更または次の作業を選んでいます"
+                    if grounded else "依頼内容を確認し、最初の作業を選んでいます")
             # Stopping at </tool> also means a tool request costs only a few tokens.
             text = self._generate(scratch, stop=["</tool>"],
                                   stream=grounded or self.config.preview)
@@ -804,7 +817,34 @@ class Agent:
                 # counting question was that line and nothing else.
                 call = self._extract_tool_call(self._split_thinking(text)[1])
             if call is None:
+                if (self.config.coder_auto
+                        and self._is_coder_action_request(self._turn_text)
+                        and not self._has_file_write(trace)
+                        and not implementation_nudge_used):
+                    implementation_nudge_used = True
+                    if self.on_progress is not None:
+                        self.on_progress(
+                            "説明だけで終わらないよう、作業フォルダへの実装を要求しています")
+                    scratch.append({
+                        "role": "user",
+                        "content": (
+                            "この依頼は説明ではなく、作業フォルダ内のファイルを実際に作成・修正する依頼です。"
+                            "直前の文章やコード例だけでは未完了です。回答にソースコードを貼らないでください。"
+                            "短く必要箇所だけ調査し、次は write_file / edit_file / apply_patch の"
+                            "正しいツール呼び出しでファイルを保存してください。"
+                            "ウェブページの作成なら、まず適切な index.html などを作成してください。"
+                            "質問が不可欠な場合だけ ask_user を使ってください。"
+                        ),
+                    })
+                    continue
                 trace.streamed = grounded and self._echoes
+                if (self.config.coder_auto
+                        and self._is_coder_action_request(self._turn_text)
+                        and not self._has_file_write(trace)):
+                    trace.streamed = False
+                    return ("まだ作業フォルダへのファイル変更が完了していません。"
+                            "コードを回答に貼るだけで完了とは扱いませんでした。"
+                            "依頼を短く具体化して再送するか、対象ファイルを指定してください。")
                 return text
             if call == previous_call:
                 repeated_call_count += 1
@@ -828,8 +868,28 @@ class Agent:
             trace.streamed = False
             return ("ツール操作の上限に達したため、残りの作業を実行できませんでした。"
                     "変更内容と未完了の作業を確認してください。")
+        if (self.config.coder_auto
+                and self._is_coder_action_request(self._turn_text)
+                and not self._has_file_write(trace)):
+            trace.streamed = False
+            return ("作業ツールの上限に達し、ファイル変更を完了できませんでした。"
+                    "コードを回答に貼るだけで完了とは扱いませんでした。")
         trace.streamed = False
         return text
+
+    @staticmethod
+    def _is_coder_action_request(text: str) -> bool:
+        return bool(re.search(
+            r"(?:作って|作成して|作成する|実装して|実装する|修正して|修正する|"
+            r"直して|直す|編集して|編集する|変更して|変更する|追加して|追加する|"
+            r"生成して|生成する|構築して|開発して|"
+            r"\b(?:create|build|implement|fix|modify|edit|add|generate|develop)\b)",
+            text, re.I))
+
+    @staticmethod
+    def _has_file_write(trace: Trace) -> bool:
+        return any(name in {"write_file", "edit_file", "apply_patch"}
+                   for name, _, _ in trace.tool_calls)
 
     def _think_then_answer(self, scratch: list[dict],
                            trace: Trace) -> tuple[str | None, str]:
