@@ -35,6 +35,7 @@ from ..engine import build_engine
 from ..memory import Memory
 from ..tools import default_registry
 from ..tools.coder import CoderTools
+from ..version import __version__
 
 log = logging.getLogger("rula.gui")
 
@@ -213,6 +214,7 @@ def info(request: Request):
     _check(request)
     eng = STATE["engine"]
     return {"status": STATE["status"], "error": STATE["error"],
+            "version": __version__,
             "model": getattr(eng, "display_name", None),
             "size": getattr(eng, "size", None),
             "backend": getattr(eng, "backend", None),
@@ -631,7 +633,8 @@ async def chat(req: ChatIn, request: Request):
                                     "最初の実装を早く作り、その後に必要なテストを実行してください。"
                                     "変更後は review_changes で実際の差分を確認し、テスト結果も確認してください。"
                                     "完了した手順だけを completed にしてください。"
-                                    "要件が曖昧なら作業を進める前に ask_user で質問してください。",
+                                    "成果や安全性に影響し、合理的な既定値で補えない情報が欠ける場合だけ"
+                                    "ask_user で質問してください。明確な依頼は質問せず、既定値を選んで実装してください。",
                         }[req.coder_mode])
                     agent.config.max_tool_calls = effort["tool_calls"] if req.coder_mode == "auto" else min(
                         effort["tool_calls"], 8)

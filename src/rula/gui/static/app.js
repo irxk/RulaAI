@@ -45,6 +45,9 @@
   }
 
   function showInfo(info) {
+    const version = $("app-version");
+    version.textContent = "ver." + info.version;
+    version.hidden = false;
     const dot = $("model-dot");
     dot.className = "dot" + (info.status === "loading" ? " loading" : info.status === "error" ? " error" : "");
     if (info.status === "loading") {

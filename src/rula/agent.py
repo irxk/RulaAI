@@ -353,7 +353,13 @@ class Agent:
                 if self._reply_lang == "英語" else None)
         parts = [clock, lang, self._style_note, self._emb_note]
         if self._grounded and not self._turn_note:
-            parts.append("この質問に必要な資料は取得済みです。ツールは使わずに答えてください。")
+            if self.config.coder_auto:
+                parts.append(
+                    "プロジェクトの調査資料は取得済みです。追加調査は不要ですが、"
+                    "依頼に必要なファイルの作成・編集や検証はツールを使って実行してください。"
+                    "write_file / edit_file / apply_patch は引き続き利用できます。")
+            else:
+                parts.append("この質問に必要な資料は取得済みです。ツールは使わずに答えてください。")
         notes = "\n".join(p.strip() for p in parts if p)
         # Said to be background, because it is read as part of what the user
         # wrote: without this, "こんにちは" was answered with a remark about the
@@ -797,7 +803,7 @@ class Agent:
             if trace.tool_calls else None)
         repeated_call_count = 1 if previous_call is not None else 0
         remaining_calls = max(0, self.config.max_tool_calls - len(trace.tool_calls))
-        implementation_nudge_used = False
+        implementation_nudge_attempts = 0
         for _ in range(remaining_calls):
             # Once material has been gathered this pass is the answer itself, and a
             # long write-up is worth streaming. Before that the output might turn out
@@ -815,26 +821,36 @@ class Agent:
                 # A bare "calc: …" after the reasoning: the fallback reads only
                 # the first line, which was "<think>". Measured: the answer to a
                 # counting question was that line and nothing else.
-                call = self._extract_tool_call(self._split_thinking(text)[1])
+                answer_text = self._split_thinking(text)[1]
+                call = self._extract_tool_call(answer_text)
+                if call is None:
+                    call = self._extract_trailing_tool_call(answer_text)
             if call is None:
                 if (self.config.coder_auto
                         and self._is_coder_action_request(self._turn_text)
                         and not self._has_file_write(trace)
-                        and not implementation_nudge_used):
-                    implementation_nudge_used = True
+                        and implementation_nudge_attempts < 2):
+                    implementation_nudge_attempts += 1
                     if self.on_progress is not None:
                         self.on_progress(
-                            "説明だけで終わらないよう、作業フォルダへの実装を要求しています")
+                            "説明だけで終わらないよう、作業フォルダへの実装を要求しています"
+                            if implementation_nudge_attempts == 1
+                            else "ファイル操作の形式を明示して、実装を再試行しています")
+                    retry_instruction = (
+                        "この依頼は十分に明確です。質問や追加調査はせず、妥当な既定値を選んで今すぐ実装してください。"
+                        "次の応答は説明文ではなく、利用可能な write_file / edit_file / apply_patch の"
+                        "いずれか一つの正しい <tool>...</tool> 呼び出しだけにしてください。"
+                        "ウェブサイトなら index.html に完成したページを保存してください。"
+                        "それ以外も依頼に合うファイルを選び、実際の内容を引数に含めて保存してください。"
+                        "プレースホルダーやソースコードだけの回答は禁止です。")
+                    if implementation_nudge_attempts > 1:
+                        retry_instruction += (
+                            "構文は <tool>write_file: 相対パス :: ファイル全文</tool> です。"
+                            "作業計画・project_info・list_files・ask_user は追加せず、"
+                            "この一回でファイル変更を実行してください。")
                     scratch.append({
                         "role": "user",
-                        "content": (
-                            "この依頼は説明ではなく、作業フォルダ内のファイルを実際に作成・修正する依頼です。"
-                            "直前の文章やコード例だけでは未完了です。回答にソースコードを貼らないでください。"
-                            "短く必要箇所だけ調査し、次は write_file / edit_file / apply_patch の"
-                            "正しいツール呼び出しでファイルを保存してください。"
-                            "ウェブページの作成なら、まず適切な index.html などを作成してください。"
-                            "質問が不可欠な場合だけ ask_user を使ってください。"
-                        ),
+                        "content": retry_instruction,
                     })
                     continue
                 trace.streamed = grounded and self._echoes
@@ -843,8 +859,8 @@ class Agent:
                         and not self._has_file_write(trace)):
                     trace.streamed = False
                     return ("まだ作業フォルダへのファイル変更が完了していません。"
-                            "コードを回答に貼るだけで完了とは扱いませんでした。"
-                            "依頼を短く具体化して再送するか、対象ファイルを指定してください。")
+                            "モデルが実行可能なファイル操作を生成できず、コードを回答に貼るだけで"
+                            "完了とは扱いませんでした。")
                 return text
             if call == previous_call:
                 repeated_call_count += 1
@@ -968,6 +984,23 @@ class Agent:
                         or tool.usage.startswith("任意")):
                     return tool.name, (argument or "").strip()
         return None
+
+    def _extract_trailing_tool_call(self, text: str) -> tuple[str, str] | None:
+        """Recover a tool call a small model appends after a short prose preamble."""
+        stripped = text.strip()
+        matches = list(TOOL_CALL_RE.finditer(stripped))
+        if not matches:
+            return None
+        match = matches[-1]
+        prefix = stripped[:match.start()]
+        if (stripped[match.end():].strip() or not prefix.strip()
+                or prefix.count("```") % 2
+                or prefix.rsplit("\n", 1)[-1].strip()):
+            return None
+        call = self._extract_tool_call(match.group(0))
+        if call is None or self.tools.get(call[0]) is None:
+            return None
+        return call
 
     def _tool_result_prompt(self, result: str, tool: str | None = None) -> str:
         coder_tools = {

@@ -10,7 +10,7 @@ source_root = Path(os.environ.get(
 )).resolve()
 sys.path.insert(0, str(source_root))
 
-from rula.agent import Agent, AgentConfig, Trace
+from rula.agent import Agent, AgentConfig, Trace, Turn
 from rula.tools.coder import CoderTools
 
 
@@ -139,6 +139,63 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
 
         self.assertTrue(result.startswith("調査上限:"))
 
+    def test_auto_coder_keeps_write_tools_enabled_after_project_info(self):
+        self.agent.engine = CaptureEngine()
+        self.agent.config.coder_auto = True
+        self.agent.history.append(Turn("user", "簡単な企業Webサイトを作って"))
+        self.agent._turn_text = "簡単な企業Webサイトを作って"
+        self.agent._grounded = True
+
+        messages = self.agent._messages()
+
+        self.assertNotIn("ツールは使わずに答えてください", messages[-1]["content"])
+        self.assertIn("追加調査は不要", messages[-1]["content"])
+        self.assertIn("write_file / edit_file / apply_patch", messages[-1]["content"])
+        self.assertIn("write_file", messages[0]["content"])
+
+    def test_full_auto_turn_writes_file_after_project_info(self):
+        self.agent.engine = CaptureEngine()
+        self.agent.config.coder_auto = True
+        self.agent._improve_answer = lambda answer, _issues, _scratch: answer
+        generated_messages = []
+        outputs = iter([
+            "<tool>write_file: index.html :: <!doctype html>\n"
+            "<html><body>企業サイト</body></html></tool>",
+            "index.html を作成しました。",
+        ])
+
+        def generate(scratch, **_kwargs):
+            generated_messages.append(self.agent._messages(scratch))
+            return next(outputs)
+
+        self.agent._generate = generate
+        with patch("rula.agent.plan_tool", return_value=("project_info", "")):
+            answer, trace = self.agent.ask("簡単な企業Webサイトを作って")
+
+        self.assertEqual(
+            Path(self.temp_dir.name, "index.html").read_text(encoding="utf-8"),
+            "<!doctype html>\n<html><body>企業サイト</body></html>",
+        )
+        self.assertEqual([tool for tool, _, _ in trace.tool_calls],
+                         ["project_info", "write_file"])
+        self.assertEqual(answer, "index.html を作成しました。")
+        latest_user_message = next(
+            message for message in generated_messages[0]
+            if message["role"] == "user")
+        self.assertNotIn("ツールは使わずに答えてください",
+                         latest_user_message["content"])
+        self.assertIn("write_file / edit_file / apply_patch",
+                      latest_user_message["content"])
+
+    def test_non_coder_grounded_answer_still_discourages_unneeded_tools(self):
+        self.agent.engine = CaptureEngine()
+        self.agent.history.append(Turn("user", "調査結果を要約して"))
+        self.agent._turn_text = "調査結果を要約して"
+        self.agent._grounded = True
+
+        self.assertIn("ツールは使わずに答えてください",
+                      self.agent._messages()[-1]["content"])
+
     def test_duplicate_plan_steps_are_rejected(self):
         result = self.coder_tools.update_plan(
             '[{"step":"実装する","status":"pending"},'
@@ -234,10 +291,30 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
         code_example = "例:\n```xml\n<tool>write_file: x.py :: pass</tool>\n```"
 
         self.assertIsNone(self.agent._extract_tool_call(code_example))
+        self.assertIsNone(self.agent._extract_trailing_tool_call(code_example))
         self.assertEqual(
             self.agent._extract_tool_call("<tool>write_file: x.py :: pass</tool>"),
             ("write_file", "x.py :: pass"),
         )
+
+    def test_auto_mode_executes_trailing_tool_call_after_prose(self):
+        self.agent.config.coder_auto = True
+        self.agent._turn_text = "サイトを作って"
+        outputs = iter([
+            "ファイルを保存します。\n"
+            "<tool>write_file: index.html :: <!doctype html><title>企業</title></tool>",
+            "index.html を保存しました。",
+        ])
+        self.agent._generate = lambda _scratch, **_kwargs: next(outputs)
+
+        answer = self.agent._answer_or_tool([], Trace())
+
+        self.assertEqual(
+            Path(self.temp_dir.name, "index.html").read_text(encoding="utf-8"),
+            "<!doctype html><title>企業</title>",
+        )
+        self.assertEqual(answer, "index.html を保存しました。")
+        self.assertNotIn("<tool>", answer)
 
     def test_tool_budget_is_cumulative_across_answer_retries(self):
         self.agent.config.max_tool_calls = 1
@@ -302,10 +379,45 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
         self.assertEqual(answer, "index.html を作成しました。")
         self.assertTrue(any("実装を要求" in message for message in progress))
 
+    def test_auto_coding_recovers_after_project_info_and_two_prose_replies(self):
+        self.agent.config.coder_auto = True
+        trace = Trace()
+        scratch = []
+        self.agent._use_tool("project_info", "", scratch, trace)
+        outputs = iter([
+            "プロジェクト情報を確認しました。企業サイトを作成します。",
+            "以下のHTMLを使えます。\n<html><body>企業サイト</body></html>",
+            "<tool>write_file: index.html :: <!doctype html>\n<html><body>会社</body></html></tool>",
+            "index.html を保存しました。",
+        ])
+        prompts = []
+        progress = []
+
+        def generate(scratch, **_kwargs):
+            prompts.append([dict(message) for message in scratch])
+            return next(outputs)
+
+        self.agent._generate = generate
+        self.agent.on_progress = progress.append
+        self.agent._turn_text = "簡単な企業Webサイト作って"
+
+        answer = self.agent._answer_or_tool(scratch, trace)
+
+        self.assertEqual(
+            Path(self.temp_dir.name, "index.html").read_text(encoding="utf-8"),
+            "<!doctype html>\n<html><body>会社</body></html>",
+        )
+        self.assertEqual([tool for tool, _, _ in trace.tool_calls],
+                         ["project_info", "write_file"])
+        self.assertEqual(answer, "index.html を保存しました。")
+        self.assertIn("index.html に完成したページ", prompts[-2][-1]["content"])
+        self.assertTrue(any("実装を再試行" in message for message in progress))
+
     def test_auto_coding_request_never_returns_unsaved_source_as_success(self):
         self.agent.config.coder_auto = True
         outputs = iter([
             "```html\n<html>未保存</html>\n```",
+            "```html\n<html>まだ未保存</html>\n```",
             "```html\n<html>まだ未保存</html>\n```",
         ])
         self.agent._generate = lambda _scratch, **_kwargs: next(outputs)
