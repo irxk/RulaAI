@@ -55,7 +55,10 @@ _interaction_lock = threading.Lock()
 CODER_WORKFLOW_INSTRUCTIONS = (
     "各依頼は4段階で進めます。"
     "1) 依頼の種類・完了条件・制約を短く捉え、成果に影響する不足だけ質問します。"
-    "2) 必要最小限のプロジェクト情報と既存変更を調べ、同じ計画や調査を繰り返しません。"
+    "2) project_info のファイル構成・開発指示・既存変更を確認し、関連する既存コードとテストを読んで、"
+    "既存のアーキテクチャ・命名・配置に沿って変更します。既存機能は新しい独立実装で置き換えず、"
+    "関連ファイルを必要に応じてまとめて更新します。空のプロジェクトの場合だけ適切な構成を新規作成します。"
+    "同じ計画や調査を繰り返しません。"
     "3) 早めに実装し、差分レビューと関連する検証を行います。失敗したら出力を根拠に修正して再検証します。"
     "4) 実際に変更した内容、確認できた検証結果、未解決点だけを報告します。"
 )
@@ -154,6 +157,18 @@ def _coder_activity_detail(name: str, argument: str) -> str:
 
 def _coder_activity_result(name: str, result: str) -> str:
     if name == "run_command":
+        if result.startswith((
+                "サーバー起動完了: ", "既存のローカルサーバー応答を確認: ")):
+            return re.sub(r"\s+", " ", result).strip()[:240]
+        if result.startswith("サーバー起動失敗: "):
+            result = re.sub(
+                r"(?i)(authorization\s*:\s*bearer\s+)[^\s\"']+",
+                r"\1[伏せ字]", result)
+            result = re.sub(
+                r"(?i)\b(password|token|secret|api[-_]?key)(\s*[:=]\s*)"
+                r"(\"[^\"]*\"|'[^']*'|\S+)",
+                r"\1\2[伏せ字]", result)
+            return re.sub(r"\s+", " ", result).strip()[:240]
         match = re.match(r"終了コード: (-?\d+)\n?(.*)", result, re.S)
         if match:
             output = re.sub(

@@ -1,11 +1,13 @@
 """Workspace-scoped tools for the desktop coding agent."""
 import ast
+import http.client
 import json
 import os
 import re
 import stat
 import subprocess
 import tempfile
+import time
 from difflib import unified_diff
 from pathlib import Path, PureWindowsPath
 from typing import Callable
@@ -34,8 +36,113 @@ _PROJECT_FILES = (
     "Cargo.toml", "go.mod", "requirements.txt", "composer.json", "pom.xml",
     "build.gradle", "CMakeLists.txt",
 )
+_MAX_PROJECT_TREE_ENTRIES = 120
+_MAX_PROJECT_TREE_CHARS = 6000
 _MAX_AUTO_INSPECTIONS = 5
 _PLAN_STATUS_RANK = {"pending": 0, "in_progress": 1, "completed": 2}
+_HTTP_SERVER_COMMANDS = (
+    (re.compile(
+        r"^\s*(?:python(?:3(?:\.\d+)?)?|py(?:\s+-\d+(?:\.\d+)?)?)"
+        r"\s+-m\s+http\.server(?:\s+(?P<port>\d+))?(?:\s+.*)?$",
+        re.I), 8000),
+    (re.compile(r"^\s*uvicorn\b.*$", re.I), 8000),
+    (re.compile(r"^\s*flask\s+run\b.*$", re.I), 5000),
+    (re.compile(r"^\s*npx\s+vite(?:\s+.*)?$", re.I), 5173),
+    (re.compile(r"^\s*npx\s+http-server\b.*$", re.I), 8080),
+    (re.compile(r"^\s*npx\s+serve\b.*$", re.I), 3000),
+)
+_SERVER_START_TIMEOUT = 30
+_SHELL_CONTROL = re.compile(r"[;&|<>]")
+
+
+def _local_http_port(command: str, workspace: Path | None = None) -> int | None:
+    """Return the expected local HTTP port for known long-running server commands."""
+    if _SHELL_CONTROL.search(command):
+        return None
+    for pattern, default_port in _HTTP_SERVER_COMMANDS:
+        match = pattern.fullmatch(command)
+        if not match:
+            continue
+        explicit = re.search(r"(?:--port(?:=|\s+)|-p\s+)(\d{1,5})\b", command)
+        port_text = (explicit.group(1) if explicit else
+                     match.groupdict().get("port"))
+        port = int(port_text) if port_text else default_port
+        return port if 1 <= port <= 65535 else None
+    node_script = re.fullmatch(
+        r"\s*(?:npm|pnpm|yarn|bun)\s+run\s+(?P<script>dev|start|preview)"
+        r"(?:\s+--\s+.*)?\s*", command, re.I)
+    if node_script and workspace is not None:
+        try:
+            package = json.loads((workspace / "package.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            package = {}
+        script = str((package.get("scripts") or {}).get(
+            node_script.group("script"), "")).lower()
+        if "vite" in script:
+            default_port = 4173 if node_script.group("script").lower() == "preview" else 5173
+        elif any(framework in script for framework in ("next", "nuxt", "webpack-dev-server")):
+            default_port = 3000
+        else:
+            return None
+        explicit = re.search(r"(?:--port(?:=|\s+)|-p\s+)(\d{1,5})\b", command)
+        port = int(explicit.group(1)) if explicit else default_port
+        return port if 1 <= port <= 65535 else None
+    php_server = re.fullmatch(r"\s*php\s+-S\s+(?:\S+:)?(?P<port>\d{1,5})(?:\s+.*)?",
+                              command, re.I)
+    if php_server:
+        port = int(php_server.group("port"))
+        return port if 1 <= port <= 65535 else None
+    return None
+
+
+def _local_http_responds(port: int) -> bool:
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=0.5)
+    try:
+        connection.request("GET", "/")
+        response = connection.getresponse()
+        return 100 <= response.status < 600
+    except (OSError, http.client.HTTPException):
+        return False
+    finally:
+        connection.close()
+
+
+def _wait_for_local_http(process: subprocess.Popen, port: int,
+                         timeout: float = _SERVER_START_TIMEOUT) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            return False
+        if _local_http_responds(port):
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def _stop_process_tree(process: subprocess.Popen) -> bool:
+    if process.poll() is not None:
+        return True
+    tree_stopped = os.name != "nt"
+    if os.name == "nt":
+        try:
+            result = subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10,
+                check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            tree_stopped = result.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            process.kill()
+    else:
+        process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            return False
+    return tree_stopped
 
 
 class CoderTools:
@@ -417,11 +524,42 @@ class CoderTools:
     def project_info(self, argument: str = "") -> str:
         return self._inspect(self._project_info, argument)
 
+    def _project_tree(self) -> str:
+        entries: list[str] = []
+        total_chars = 0
+        truncated = False
+        for root, dirs, files in os.walk(self.workspace, followlinks=False):
+            dirs[:] = sorted(
+                name for name in dirs
+                if name not in _SKIP_DIRS and not (Path(root) / name).is_symlink())
+            relative_root = Path(root).relative_to(self.workspace)
+            depth = 0 if relative_root == Path(".") else len(relative_root.parts)
+            children = [(name, True) for name in dirs]
+            children.extend((name, False) for name in sorted(files))
+            for name, is_dir in children:
+                if not is_dir and (Path(root) / name).is_symlink():
+                    continue
+                entry = f"{'  ' * depth}- {name}{'/' if is_dir else ''}"
+                if (len(entries) >= _MAX_PROJECT_TREE_ENTRIES
+                        or total_chars + len(entry) + 1 > _MAX_PROJECT_TREE_CHARS):
+                    truncated = True
+                    break
+                entries.append(entry)
+                total_chars += len(entry) + 1
+            if truncated:
+                break
+        if not entries:
+            return "（ファイル構成は空です）"
+        if truncated:
+            entries.append("… (構成表示の上限)")
+        return "\n".join(entries)
+
     def _project_info(self, argument: str = "") -> str:
         if argument.strip():
             return "このツールに引数は不要です。"
-        parts = [f"作業フォルダ: {self.workspace}"]
-        remaining = 12_000
+        tree_section = f"\n--- ファイル構成 ---\n{self._project_tree()}"
+        parts = [f"作業フォルダ: {self.workspace}", tree_section]
+        remaining = max(0, 12_000 - sum(map(len, parts)))
         project_files = list(_PROJECT_FILES)
         for root, dirs, files in os.walk(self.workspace, followlinks=False):
             dirs[:] = sorted(d for d in dirs if d not in _SKIP_DIRS)
@@ -804,6 +942,9 @@ class CoderTools:
             approved = self.interact("command", command=command)
             if approved != "approved":
                 return "ユーザーがコマンドを拒否しました。変更を加えずに続行してください。"
+        port = _local_http_port(command, self.workspace)
+        if port is not None:
+            return self._start_local_server(command, port)
         try:
             result = subprocess.run(
                 command, cwd=self.workspace, shell=True, text=True,
@@ -819,3 +960,37 @@ class CoderTools:
             return f"コマンドを起動できませんでした: {exc}"
         output = result.stdout[-_MAX_OUTPUT_CHARS:]
         return f"終了コード: {result.returncode}\n{output or '(出力なし)'}"
+
+    def _start_local_server(self, command: str, port: int) -> str:
+        """Run a known dev server without waiting for its long-lived process to exit."""
+        if _local_http_responds(port):
+            return (f"既存のローカルサーバー応答を確認: http://127.0.0.1:{port}/\n"
+                    "HTTP応答済みのため、同じポートでの二重起動は行っていません。")
+        try:
+            with tempfile.TemporaryFile(mode="w+b") as log_file:
+                process = subprocess.Popen(
+                    command, cwd=self.workspace, shell=True,
+                    stdout=log_file, stderr=subprocess.STDOUT,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                ready = _wait_for_local_http(process, port)
+                log_file.flush()
+                log_file.seek(0)
+                output = log_file.read()[-2000:].decode("utf-8", "replace").strip()
+                if ready:
+                    result = (f"サーバー起動完了: http://127.0.0.1:{port}/\n"
+                              f"プロセスID: {process.pid}")
+                    return result
+
+                return_code = process.poll()
+                if return_code is None:
+                    stopped = _stop_process_tree(process)
+                    reason = f"{_SERVER_START_TIMEOUT}秒以内にlocalhost:{port}の応答がありません"
+                    if not stopped:
+                        reason += "。起動プロセスの停止を確認できませんでした"
+                else:
+                    reason = f"起動コマンドが終了しました (終了コード: {return_code})"
+                return (f"サーバー起動失敗: {reason}。\n"
+                        f"コマンド: {command}"
+                        + (f"\n起動ログ:\n{output}" if output else ""))
+        except OSError as exc:
+            return f"サーバーを起動できませんでした: {exc}"

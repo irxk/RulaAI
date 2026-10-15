@@ -17,6 +17,14 @@ from rula.version import __version__
 
 
 class GuiVersionTests(unittest.TestCase):
+    def test_local_server_activity_shows_readiness_instead_of_generic_running(self):
+        result = server._coder_activity_result(
+            "run_command",
+            "サーバー起動完了: http://127.0.0.1:8000/\nプロセスID: 4321")
+
+        self.assertIn("サーバー起動完了", result)
+        self.assertIn("127.0.0.1:8000", result)
+
     def test_coder_prompt_uses_bounded_four_phase_workflow(self):
         workflow = server.CODER_WORKFLOW_INSTRUCTIONS
 
