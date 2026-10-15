@@ -209,6 +209,15 @@ _WORD_PROBLEM = re.compile(
     r"割り勘|ずつ|分けると|分ける|買うと|買って|払うと|支払)")
 _ASKS_AMOUNT = re.compile(r"(いくら|いくつ|何[個人本匹枚回円歳日分秒割]|どれだけ|何時間|何[%％]|何パーセント)")
 _NUMBER = re.compile(r"[0-9０-９]+(?:[.,][0-9]+)?|[一二三四五六七八九十百千]+(?=[人個本匹枚回円歳つ])")
+_STRUCTURED_REASONING = re.compile(
+    r"(論理的に考|場合分け|条件を(?:すべて|整理|比較)|複数の条件|"
+    r"前提を整理|順を追って|手順を追って|矛盾がないか|"
+    r"最適な組み合わせ|最適な組合せ|最短手順|最小手数|"
+    r"論理パズル|推理問題|真偽を判定|成り立つか)")
+_EXPLICIT_SEARCH = re.compile(r"(検索|ググっ|調査して|調べて|探して)")
+_CODING_REQUEST = re.compile(
+    r"(?:コード|関数|プログラム|実装|"
+    r"\b(?:python|javascript|typescript|java|rust|go|c\+\+)\b)", re.I)
 
 
 def asks_amount(text: str) -> bool:
@@ -230,6 +239,19 @@ def wants_reasoning(user_input: str) -> bool:
         return True
     # Three or more figures and a "how much": a sum to work out, whatever its words.
     return numbers >= 3 and bool(_ASKS_AMOUNT.search(text))
+
+
+def needs_structured_reasoning(user_input: str) -> bool:
+    """Whether the request explicitly asks for bounded multi-condition reasoning.
+
+    Keep ordinary questions and coding requests on the faster path; this is a
+    narrow symbolic routing signal, not an attempt to infer arbitrary complexity.
+    """
+    text = user_input.strip()
+    return (bool(_STRUCTURED_REASONING.search(text))
+            and not _EXPLICIT_SEARCH.search(text)
+            and not _CODING_REQUEST.search(text)
+            and not URL_RE.search(text))
 
 
 # The date and time are in every prompt. "今年は西暦何年?" used to match "今年" as a

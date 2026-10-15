@@ -17,6 +17,14 @@ from rula.version import __version__
 
 
 class GuiVersionTests(unittest.TestCase):
+    def test_coder_prompt_uses_bounded_four_phase_workflow(self):
+        workflow = server.CODER_WORKFLOW_INSTRUCTIONS
+
+        self.assertIn("依頼の種類・完了条件・制約", workflow)
+        self.assertIn("同じ計画や調査を繰り返しません", workflow)
+        self.assertIn("失敗したら出力を根拠に修正して再検証", workflow)
+        self.assertIn("未解決点だけを報告", workflow)
+
     def test_stream_guard_recognizes_each_new_coder_tool(self):
         for name in ("find_files", "find_symbol", "read_files",
                      "file_outline", "check_python"):

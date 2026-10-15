@@ -52,6 +52,14 @@ _memory: Memory | None = None
 _pending_interactions: dict[str, "PendingInteraction"] = {}
 _interaction_lock = threading.Lock()
 
+CODER_WORKFLOW_INSTRUCTIONS = (
+    "各依頼は4段階で進めます。"
+    "1) 依頼の種類・完了条件・制約を短く捉え、成果に影響する不足だけ質問します。"
+    "2) 必要最小限のプロジェクト情報と既存変更を調べ、同じ計画や調査を繰り返しません。"
+    "3) 早めに実装し、差分レビューと関連する検証を行います。失敗したら出力を根拠に修正して再検証します。"
+    "4) 実際に変更した内容、確認できた検証結果、未解決点だけを報告します。"
+)
+
 
 @dataclass
 class PendingInteraction:
@@ -601,7 +609,7 @@ async def chat(req: ChatIn, request: Request):
                         "medium": {"tool_calls": 14, "tokens": 2048, "continuations": 2},
                         "large": {"tool_calls": 32, "tokens": 6144, "continuations": 6},
                     }[req.coder_effort]
-                    agent.config.extra_system = (
+                    agent.config.extra_system = (CODER_WORKFLOW_INSTRUCTIONS +
                         "あなたは単一のローカル9Bモデルで動作する、自律型ソフトウェア開発エージェントです。"
                         "複数の関連ファイルを読む場合は read_files、ファイル名を探す場合は find_files、"
                         "関数やクラスを探す場合は find_symbol / file_outline、"
@@ -612,8 +620,6 @@ async def chat(req: ChatIn, request: Request):
                         "project_info または find_files / list_files で指示・構成を把握し、"
                         "関連ファイルは read_files、実装箇所は search_code で必要な範囲だけ確認します。"
                         "既存変更は git_status / git_diff、既存テストは find_files で確認します。"
-                        "作業は「依頼の完了条件を短く整理→必要最小限を調査→早めに実装→変更差分をレビュー"
-                        "→関連検証→結果報告」の順に進めます。"
                         "検証に失敗したら出力を根拠に修正し、再検証してから完了を報告します。"
                         "計画は行動の代わりではありません。調査や計画を繰り返さず、"
                         "確認済み情報で実装可能ならすぐファイルを変更してください。"

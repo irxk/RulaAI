@@ -11,7 +11,8 @@ from .engine import Engine, GenConfig
 from .memory import Memory
 from .persona import build_system_prompt, current_time_note
 from .planner import (asks_amount, detect_draw, detect_tone, reply_language, searchable,
-                      split_passage, wants_depth, wants_reasoning)
+                      needs_structured_reasoning, split_passage, wants_depth,
+                      wants_reasoning)
 from .planner import plan as plan_tool
 from .quality import (StreamMonitor, check_arithmetic, chinese_leak, classify_question,
                       correct_arithmetic,
@@ -480,7 +481,9 @@ class Agent:
         # function mentions 最大公約数 and numbers, but it is code, not a sum.
         trace.auto_think = (self.config.auto_think and not self.config.thinking
                             and getattr(self.engine, "supports_thinking", False)
-                            and qtype == "problem")
+                            and (qtype == "problem"
+                                 or (qtype != "code"
+                                     and needs_structured_reasoning(instruction))))
         if trace.auto_think:
             self.config.thinking = True
             self.config.max_new_tokens = max(self.config.max_new_tokens, 4096)
