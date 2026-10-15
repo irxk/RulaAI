@@ -92,7 +92,7 @@
     $("coder-effort").title = {
       small: "小: 最大8回のツール利用。速度優先。",
       medium: "中: 最大14回のツール利用。調査・実装・検証の標準。",
-      large: "大: 最大24回のツール利用。思考・調査・回答量を拡張。9Bモデルは同一。",
+      large: "大: 最大32回のツール利用、最大6,144トークン。思考・調査・回答量を拡張。9Bモデルは同一。",
     }[$("coder-effort").value];
     $("attach").disabled = coder || !(state.info && state.info.status === "ready" && state.info.vision);
     if (coder) clearAttachment();

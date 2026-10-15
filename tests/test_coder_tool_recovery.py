@@ -156,6 +156,74 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
 
         self.assertTrue(result.startswith("調査上限:"))
 
+    def test_find_files_finds_matching_files_without_following_skipped_dirs(self):
+        Path(self.temp_dir.name, "src").mkdir()
+        Path(self.temp_dir.name, "src", "main.py").write_text(
+            "print('ok')", encoding="utf-8")
+        hidden = Path(self.temp_dir.name, "node_modules")
+        hidden.mkdir()
+        Path(hidden, "ignored.py").write_text("ignored", encoding="utf-8")
+
+        result = self.coder_tools.find_files("**/*.py")
+
+        self.assertIn("src/main.py", result)
+        self.assertNotIn("ignored.py", result)
+        self.assertIn("作業フォルダ内の相対パス", self.coder_tools.find_files("../*.py"))
+
+    def test_read_files_batches_related_files_as_one_auto_inspection(self):
+        for name in ("one.py", "two.py"):
+            Path(self.temp_dir.name, name).write_text(
+                f"print('{name}')", encoding="utf-8")
+
+        result = self.coder_tools.registry().get("read_files").run("one.py\ntwo.py")
+
+        self.assertIn("--- one.py ---", result)
+        self.assertIn("print('one.py')", result)
+        self.assertIn("--- two.py ---", result)
+        self.assertEqual(self.coder_tools._inspection_count, 1)
+
+    def test_find_symbol_and_file_outline_locate_python_definitions(self):
+        source = Path(self.temp_dir.name, "module.py")
+        source.write_text(
+            "class Example:\n"
+            "    def method(self):\n"
+            "        return 1\n"
+            "\n"
+            "def helper():\n"
+            "    return 2\n",
+            encoding="utf-8",
+        )
+
+        matches = self.coder_tools.find_symbol("helper")
+        outline = self.coder_tools.file_outline("module.py")
+
+        self.assertIn("module.py:5: def helper", matches)
+        self.assertIn("module.py:1: class Example", outline)
+        self.assertIn("module.py:2: def method", outline)
+        self.assertIn("module.py:5: def helper", outline)
+
+    def test_check_python_reports_syntax_without_executing_source(self):
+        safe = Path(self.temp_dir.name, "safe.py")
+        bad = Path(self.temp_dir.name, "bad.py")
+        safe.write_text("raise RuntimeError('must not execute')\n", encoding="utf-8")
+        bad.write_text("def broken(:\n    pass\n", encoding="utf-8")
+
+        result = self.coder_tools.check_python("safe.py\nbad.py")
+
+        self.assertIn("bad.py:1:", result)
+        self.assertIn("Python構文エラー", result)
+        self.assertTrue(safe.is_file())
+
+    def test_coder_registry_excludes_irrelevant_general_tools(self):
+        registry = self.coder_tools.registry()
+
+        self.assertIn("search", registry.names())
+        for name in ("find_files", "find_symbol", "read_files", "file_outline",
+                     "check_python", "write_file"):
+            self.assertIn(name, registry.names())
+        for name in ("calc", "date", "smart_search"):
+            self.assertNotIn(name, registry.names())
+
     def test_auto_coder_keeps_write_tools_enabled_after_project_info(self):
         self.agent.engine = CaptureEngine()
         self.agent.config.coder_auto = True

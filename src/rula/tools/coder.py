@@ -1,4 +1,5 @@
 """Workspace-scoped tools for the desktop coding agent."""
+import ast
 import json
 import os
 import re
@@ -6,7 +7,7 @@ import stat
 import subprocess
 import tempfile
 from difflib import unified_diff
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Callable
 
 from .base import Tool, ToolRegistry
@@ -19,6 +20,9 @@ _MAX_FILE_BYTES = 100_000
 _MAX_PATCH_FILES = 20
 _MAX_PATCH_BYTES = 1_000_000
 _MAX_OUTPUT_CHARS = 20_000
+_MAX_BATCH_READ_FILES = 8
+_MAX_PYTHON_CHECK_FILES = 20
+_MAX_FIND_FILES = 200
 _TEXT_SUFFIXES = {
     ".c", ".cc", ".cfg", ".cpp", ".cs", ".css", ".go", ".h", ".hpp", ".html",
     ".ini", ".java", ".js", ".json", ".jsx", ".kt", ".md", ".php", ".ps1",
@@ -58,20 +62,41 @@ class CoderTools:
         return candidate
 
     def registry(self) -> ToolRegistry:
-        from . import default_registry
+        from .search import DEEP_SEARCH_TOOL, READ_URL_TOOL, SEARCH_TOOL
 
-        registry = default_registry()
+        registry = ToolRegistry()
+        for tool in (SEARCH_TOOL, DEEP_SEARCH_TOOL, READ_URL_TOOL):
+            registry.register(tool)
         registry.register(Tool(
             "list_files", "作業フォルダ内のファイル一覧を取得する",
             "相対パス (例: . または src)",
             lambda argument: self._inspect(self.list_files, argument)))
         registry.register(Tool(
+            "find_files", "名前やglobパターンで作業フォルダ内のファイルを探す",
+            "相対globパターン (例: src/**/*.py または **/*test*.js)",
+            lambda argument: self._inspect(self.find_files, argument)))
+        registry.register(Tool(
+            "find_symbol", "関数・クラスなどの定義箇所をソースから探す",
+            "シンボル名", lambda argument: self._inspect(self.find_symbol, argument)))
+        registry.register(Tool(
             "read_file", "作業フォルダ内のテキストファイルを読む",
             "相対ファイルパス または 相対ファイルパス :: 開始行 :: 終了行",
             lambda argument: self._inspect(self.read_file, argument)))
         registry.register(Tool(
+            "read_files", "関連する複数のテキストファイルを一度に読む",
+            "作業フォルダ相対パスを1行に1つ (最大8ファイル)",
+            lambda argument: self._inspect(self.read_files, argument)))
+        registry.register(Tool(
+            "file_outline", "Pythonファイルの関数・クラス・メソッドと行番号を一覧表示する",
+            "作業フォルダ相対の.pyファイルパス",
+            lambda argument: self._inspect(self.file_outline, argument)))
+        registry.register(Tool(
             "search_code", "作業フォルダ内のソースコードから文字列を検索する",
             "検索文字列", lambda argument: self._inspect(self.search_code, argument)))
+        registry.register(Tool(
+            "check_python", "Pythonファイルの構文を実行せずに検査する",
+            "作業フォルダ相対の.pyファイルを1行に1つ (最大20ファイル)",
+            self.check_python))
         registry.register(Tool(
             "project_info", "プロジェクト構成・開発指示・変更状態を確認する",
             "引数なし", self.project_info))
@@ -137,6 +162,35 @@ class CoderTools:
                     return "\n".join(found)
         return "\n".join(found) or "ファイルはありません。"
 
+    def find_files(self, pattern: str) -> str:
+        pattern = pattern.strip().replace("\\", "/")
+        if not pattern:
+            return "検索パターンが空です。"
+        if (Path(pattern).is_absolute() or PureWindowsPath(pattern).is_absolute()
+                or any(part == ".." for part in pattern.split("/"))):
+            return "検索パターンには作業フォルダ内の相対パスを指定してください。"
+        found: list[str] = []
+        visited = 0
+        for root, dirs, files in os.walk(self.workspace, followlinks=False):
+            dirs[:] = sorted(
+                name for name in dirs
+                if name not in _SKIP_DIRS and not (Path(root) / name).is_symlink())
+            for name in sorted(files):
+                path = Path(root) / name
+                if path.is_symlink():
+                    continue
+                visited += 1
+                relative = path.relative_to(self.workspace).as_posix()
+                if Path(relative).match(pattern):
+                    found.append(relative)
+                    if len(found) >= _MAX_FIND_FILES:
+                        return "\n".join(found) + f"\n… ({_MAX_FIND_FILES}件で打ち切り)"
+                if visited >= 20_000:
+                        truncated = "\n… (20,000ファイルを調査)"
+                        return ("\n".join(found) + truncated if found
+                                else "該当ファイルはありません。" + truncated)
+        return "\n".join(found) or "該当ファイルはありません。"
+
     def read_file(self, relative: str) -> str:
         parts = relative.rsplit(" :: ", 2)
         path_arg = parts[0]
@@ -167,6 +221,166 @@ class CoderTools:
             return f"開始行がファイルの範囲外です (全 {len(lines)} 行)。"
         return "\n".join(f"{i}: {line}" for i, line in enumerate(
             lines[start_line - 1:end_line], start_line))
+
+    def find_symbol(self, symbol: str) -> str:
+        symbol = symbol.strip()
+        if not symbol or len(symbol) > 120 or not re.fullmatch(
+                r"[A-Za-z_$][A-Za-z0-9_$]*", symbol):
+            return "シンボル名は英数字・アンダースコアで指定してください。"
+        escaped = re.escape(symbol)
+        end = rf"{escaped}(?![\w$])"
+        patterns = {
+            ".py": re.compile(rf"^\s*(?:async\s+)?(?:def|class)\s+{end}"),
+            ".js": re.compile(
+                rf"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?"
+                rf"(?:function|class|const|let|var)\s+{end}"),
+            ".jsx": re.compile(
+                rf"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?"
+                rf"(?:function|class|const|let|var)\s+{end}"),
+            ".ts": re.compile(
+                rf"^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?"
+                rf"(?:async\s+)?(?:function|class|interface|type|enum|const|let|var)"
+                rf"\s+{end}"),
+            ".tsx": re.compile(
+                rf"^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?"
+                rf"(?:async\s+)?(?:function|class|interface|type|enum|const|let|var)"
+                rf"\s+{end}"),
+            ".go": re.compile(rf"^\s*func\s+(?:\([^)]*\)\s*)?{end}"),
+            ".rs": re.compile(
+                rf"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?"
+                rf"(?:fn|struct|enum|trait|type|const|static)\s+{end}"),
+        }
+        matches: list[str] = []
+        visited = 0
+        scanned = 0
+        for root, dirs, files in os.walk(self.workspace, followlinks=False):
+            dirs[:] = sorted(
+                name for name in dirs
+                if name not in _SKIP_DIRS and not (Path(root) / name).is_symlink())
+            for name in sorted(files):
+                path = Path(root) / name
+                if path.is_symlink():
+                    continue
+                scanned += 1
+                if scanned > 20_000:
+                    break
+                pattern = patterns.get(path.suffix.lower())
+                if pattern is None:
+                    continue
+                try:
+                    if path.stat().st_size > _MAX_FILE_BYTES:
+                        continue
+                    with path.open(encoding="utf-8") as source:
+                        for number, line in enumerate(source, 1):
+                            if pattern.search(line):
+                                relative = path.relative_to(self.workspace).as_posix()
+                                matches.append(
+                                    f"{relative}:{number}: {line.strip()[:240]}")
+                                if len(matches) >= 100:
+                                    return "\n".join(matches) + "\n… (100件で打ち切り)"
+                except (OSError, UnicodeError):
+                    continue
+                visited += 1
+                if visited >= 3000 or scanned >= 20_000:
+                    break
+            if visited >= 3000 or scanned >= 20_000:
+                break
+        return "\n".join(matches) or "定義が見つかりません。"
+
+    def file_outline(self, relative: str) -> str:
+        try:
+            path = self._path(relative.strip())
+        except ValueError as exc:
+            return str(exc)
+        if path.suffix.lower() != ".py":
+            return "file_outline はPythonファイル (.py) に対応しています。"
+        if not path.is_file():
+            return f"ファイルが見つかりません: {relative}"
+        if path.stat().st_size > _MAX_FILE_BYTES:
+            return f"ファイルが大きすぎるため解析できません: {relative}"
+        try:
+            module = ast.parse(self._read_text(path), filename=relative)
+        except SyntaxError as exc:
+            return f"Python構文エラー ({relative}:{exc.lineno or 1}): {exc.msg}"
+        except (OSError, UnicodeError) as exc:
+            return f"ファイルを解析できません ({relative}): {exc}"
+        symbols = [
+            (node.lineno, node.name, "class" if isinstance(node, ast.ClassDef) else "def")
+            for node in ast.walk(module)
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        symbols.sort(key=lambda item: (item[0], item[1]))
+        if not symbols:
+            return "クラス・関数の定義はありません。"
+        return "\n".join(
+            f"{relative}:{line}: {kind} {name}"
+            for line, name, kind in symbols[:300]
+        )
+
+    def read_files(self, paths: str) -> str:
+        raw_paths = paths.strip()
+        if not raw_paths:
+            return "ファイルパスが空です。"
+        if raw_paths.startswith("["):
+            try:
+                requested = json.loads(raw_paths)
+            except json.JSONDecodeError as exc:
+                return f"ファイル一覧のJSONが不正です: {exc.msg}"
+            if not isinstance(requested, list) or not all(
+                    isinstance(path, str) and path.strip() for path in requested):
+                return "JSON配列には相対ファイルパス文字列を指定してください。"
+        else:
+            requested = [path.strip() for path in raw_paths.splitlines() if path.strip()]
+        if len(requested) > _MAX_BATCH_READ_FILES:
+            return f"一度に読めるファイルは最大 {_MAX_BATCH_READ_FILES} 件です。"
+        if len(set(requested)) != len(requested):
+            return "ファイル一覧に同じパスが重複しています。"
+
+        sections: list[str] = []
+        remaining = _MAX_OUTPUT_CHARS
+        for relative in requested:
+            result = self.read_file(relative)
+            section = f"--- {relative} ---\n{result}"
+            if len(section) > remaining:
+                sections.append(section[:remaining] + "\n… (一括読み込みの出力上限)")
+                break
+            sections.append(section)
+            remaining -= len(section)
+            if remaining <= 0:
+                break
+        return "\n\n".join(sections) or "ファイルパスが空です。"
+
+    def check_python(self, paths: str) -> str:
+        requested = [path.strip() for path in paths.splitlines() if path.strip()]
+        if not requested:
+            return "検査するPythonファイルを指定してください。"
+        if len(requested) > _MAX_PYTHON_CHECK_FILES:
+            return f"一度に検査できるPythonファイルは最大 {_MAX_PYTHON_CHECK_FILES} 件です。"
+        errors: list[str] = []
+        checked = 0
+        for relative in requested:
+            if Path(relative).suffix.lower() != ".py":
+                return f"Pythonファイル (.py) ではありません: {relative}"
+            try:
+                path = self._path(relative)
+            except ValueError as exc:
+                return str(exc)
+            if not path.is_file():
+                return f"ファイルが見つかりません: {relative}"
+            if path.stat().st_size > _MAX_FILE_BYTES:
+                return f"ファイルが大きすぎるため検査できません: {relative}"
+            try:
+                source = self._read_text(path)
+                ast.parse(source, filename=relative)
+            except SyntaxError as exc:
+                errors.append(
+                    f"{relative}:{exc.lineno or 1}:{exc.offset or 1}: {exc.msg}")
+            except (OSError, UnicodeError) as exc:
+                return f"ファイルを検査できません ({relative}): {exc}"
+            checked += 1
+        if errors:
+            return "Python構文エラー:\n" + "\n".join(errors[:100])
+        return f"Python構文OK: {checked}ファイル (コードは実行していません)"
 
     def search_code(self, query: str) -> str:
         query = query.strip()

@@ -17,6 +17,12 @@ from rula.version import __version__
 
 
 class GuiVersionTests(unittest.TestCase):
+    def test_stream_guard_recognizes_each_new_coder_tool(self):
+        for name in ("find_files", "find_symbol", "read_files",
+                     "file_outline", "check_python"):
+            with self.subTest(name=name):
+                self.assertIn(name, server._TOOL_WORDS)
+
     def test_only_large_coder_effort_enables_supported_native_reasoning(self):
         engine = SimpleNamespace(supports_thinking=True)
 

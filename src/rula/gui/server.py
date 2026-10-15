@@ -67,7 +67,8 @@ def _coder_thinking_enabled(effort: str, engine: object) -> bool:
 def _tool_words() -> list[str]:
     from ..tools.base import ALIASES
     coder_tool_words = {
-        "list_files", "read_file", "search_code", "project_info", "update_plan",
+        "list_files", "find_files", "find_symbol", "read_file", "read_files",
+        "file_outline", "search_code", "check_python", "project_info", "update_plan",
         "git_status", "git_diff", "ask_user", "write_file", "edit_file",
         "apply_patch", "review_changes", "run_command",
     }
@@ -593,19 +594,24 @@ async def chat(req: ChatIn, request: Request):
                     effort = {
                         "small": {"tool_calls": 8, "tokens": 1024, "continuations": 1},
                         "medium": {"tool_calls": 14, "tokens": 2048, "continuations": 2},
-                        "large": {"tool_calls": 24, "tokens": 4096, "continuations": 4},
+                        "large": {"tool_calls": 32, "tokens": 6144, "continuations": 6},
                     }[req.coder_effort]
                     agent.config.extra_system = (
                         "あなたは単一のローカル9Bモデルで動作する、自律型ソフトウェア開発エージェントです。"
+                        "複数の関連ファイルを読む場合は read_files、ファイル名を探す場合は find_files、"
+                        "関数やクラスを探す場合は find_symbol / file_outline、"
+                        "Python編集後の構文検査は check_python を使い、ツール往復を減らします。"
+                        "適切な文字列検索は search_code を使い、同じファイルを何度も読み直しません。"
                         "複数段階の依頼は update_plan で具体的な手順を共有し、実際の状態に合わせて"
                         "pending / in_progress / completed を更新します。"
-                        "作業フォルダの project_info / git_status / list_files で指示・構成・変更状態を把握し、"
-                        "関連ファイル・呼び出し元・既存テストを search_code / read_file で確認します。"
+                        "project_info または find_files / list_files で指示・構成を把握し、"
+                        "関連ファイルは read_files、実装箇所は search_code で必要な範囲だけ確認します。"
+                        "既存変更は git_status / git_diff、既存テストは find_files で確認します。"
                         "不明点が成果や安全性に影響する場合は ask_user で一問ずつ質問します。"
                         "既存の設計・依存・書式を尊重し、必要最小限の変更を行い、"
                         "変更前の既存差分を git_status / git_diff で把握し、"
                         "ユーザーの作業中変更を上書きしないようにします。"
-                        "変更後は関連テストや型チェックを run_command で実行します。"
+                        "変更後は Python の check_python と、必要な関連テストや型チェックを run_command で実行します。"
                         "オートモードではユーザーが開始時に確認した後、コマンドを個別確認なしで実行します。"
                         "テスト結果を確認し、実施内容・検証結果・未解決点を明確に報告します。"
                         "ファイルを読んだだけで変更したと主張せず、成功していないテストを成功と報告しないこと。"
@@ -635,7 +641,7 @@ async def chat(req: ChatIn, request: Request):
                                     "必ず作業フォルダへ保存してください。"
                                     "必要なら update_plan は最初に一度だけ共有し、"
                                     "同じ計画を再送せず、状態変化時だけ進捗を更新してください。"
-                                    "project_info / git_status / list_files で最初に状況を把握し、"
+                                    "project_info または find_files / list_files で最初に状況を把握し、"
                                     "調査ツール呼び出しは合計5回以内にして、その後は必ず実装を始めてください。"
                                     "必要に応じて apply_patch / edit_file / write_file を使い、"
                                     "最初の実装を早く作り、その後に必要なテストを実行してください。"
