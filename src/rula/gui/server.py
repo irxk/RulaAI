@@ -104,6 +104,9 @@ _TOOL_LABELS = {"search": "検索しています", "deep_search": "ページを�
                 "smart_search": "いくつかの観点で検索しています", "read_url": "ページを読んでいます",
                 "calc": "計算しています", "date": "日付を計算しています",
                 "list_files": "作業フォルダを一覧しています", "read_file": "ファイルを読んでいます",
+                "find_files": "ファイルを検索しています", "find_symbol": "定義を検索しています",
+                "file_outline": "ファイル構造を確認しています", "read_files": "複数ファイルを読んでいます",
+                "check_python": "Python構文を検査しています",
                 "search_code": "コードを検索しています", "project_info": "プロジェクト情報を確認しています",
                 "update_plan": "作業計画を更新しています", "git_status": "Git状態を確認しています",
                 "git_diff": "Git差分を確認しています",
@@ -132,10 +135,12 @@ def _coder_activity_detail(name: str, argument: str) -> str:
             r"(\"[^\"]*\"|'[^']*'|[^\s;]+)",
             r"\1\2[伏せ字]", command)
         return command[:240]
-    if name in ("read_file", "git_diff"):
+    if name in ("read_file", "find_files", "file_outline", "check_python", "git_diff"):
         return value.split(" :: ", 1)[0][:240]
-    if name in ("search_code",):
+    if name in ("search_code", "find_symbol"):
         return value[:120]
+    if name == "read_files":
+        return "、".join(value.splitlines()[:5])[:240]
     return value[:120] if name in ("list_files",) else ""
 
 
@@ -607,6 +612,11 @@ async def chat(req: ChatIn, request: Request):
                         "project_info または find_files / list_files で指示・構成を把握し、"
                         "関連ファイルは read_files、実装箇所は search_code で必要な範囲だけ確認します。"
                         "既存変更は git_status / git_diff、既存テストは find_files で確認します。"
+                        "作業は「依頼の完了条件を短く整理→必要最小限を調査→早めに実装→変更差分をレビュー"
+                        "→関連検証→結果報告」の順に進めます。"
+                        "検証に失敗したら出力を根拠に修正し、再検証してから完了を報告します。"
+                        "計画は行動の代わりではありません。調査や計画を繰り返さず、"
+                        "確認済み情報で実装可能ならすぐファイルを変更してください。"
                         "不明点が成果や安全性に影響する場合は ask_user で一問ずつ質問します。"
                         "既存の設計・依存・書式を尊重し、必要最小限の変更を行い、"
                         "変更前の既存差分を git_status / git_diff で把握し、"

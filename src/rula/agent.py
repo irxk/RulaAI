@@ -55,7 +55,7 @@ DECLINE_RE = re.compile(
 
 # Tool names may come back translated ("検索") and with a full-width colon, so the
 # name group is permissive and the registry decides what's real.
-_NAME = r"([^\s:：<>]{1,12})"
+_NAME = r"([^\s:：<>]{1,32})"
 _COLON = r"\s*[:：]\s*"
 TOOL_CALL_RE = re.compile(
     rf"<tool>\s*{_NAME}(?:{_COLON}(.*?))?\s*</tool>", re.S | re.I)
@@ -806,6 +806,7 @@ class Agent:
         repeated_call_count = 1 if previous_call is not None else 0
         remaining_calls = max(0, self.config.max_tool_calls - len(trace.tool_calls))
         implementation_nudge_attempts = 0
+        completion_nudges: set[str] = set()
         for _ in range(remaining_calls):
             # Once material has been gathered this pass is the answer itself, and a
             # long write-up is worth streaming. Before that the output might turn out
@@ -856,6 +857,32 @@ class Agent:
                         "content": retry_instruction,
                     })
                     continue
+                completion_stage = (
+                    self._coder_completion_stage(trace) if self.config.coder_auto else None)
+                if completion_stage:
+                    if completion_stage not in completion_nudges:
+                        completion_nudges.add(completion_stage)
+                        if self.on_progress is not None:
+                            self.on_progress(
+                                "変更差分をレビューしています"
+                                if completion_stage == "review"
+                                else "変更後のテスト・構文検査を実行しています")
+                        instruction = (
+                            "ファイル変更後の完了条件がまだ満たされていません。"
+                            "回答を確定せず、review_changes を呼び出して今回の変更差分を確認してください。"
+                            if completion_stage == "review"
+                            else
+                            "差分レビューは完了しましたが、変更後の検証がまだありません。"
+                            "プロジェクトに合ったテスト・ビルド・静的検査を run_command で実行してください。"
+                            "Pythonだけの変更で実行可能なテストがなければ check_python で構文を検査してください。"
+                            "検証結果を確認するまで完了と報告しないでください。")
+                        scratch.append({"role": "user", "content": instruction})
+                        continue
+                    trace.streamed = False
+                    return (
+                        "ファイルは変更しましたが、"
+                        + ("差分レビュー" if completion_stage == "review" else "変更後のテスト・構文検査")
+                        + "を完了できませんでした。未検証の変更として確認してください。")
                 trace.streamed = grounded and self._echoes
                 if (self.config.coder_auto
                         and self._is_coder_action_request(self._turn_text)
@@ -880,6 +907,14 @@ class Agent:
             previous_call = call
             repeated_call_count = 0
             self._use_tool(*call, scratch, trace)
+        completion_stage = (
+            self._coder_completion_stage(trace) if self.config.coder_auto else None)
+        if completion_stage:
+            trace.streamed = False
+            return (
+                "ファイルは変更しましたが、"
+                + ("差分レビュー" if completion_stage == "review" else "変更後のテスト・構文検査")
+                + "を完了できませんでした。未検証の変更として確認してください。")
         # A final generation is allowed after the action budget is exhausted, but
         # never execute or display another tool request as if it were an answer.
         text = self._generate(scratch, stop=["</tool>"], stream=False)
@@ -911,6 +946,40 @@ class Agent:
     def _has_file_write(trace: Trace) -> bool:
         return any(name in {"write_file", "edit_file", "apply_patch"}
                    for name, _, _ in trace.tool_calls)
+
+    @staticmethod
+    def _coder_completion_stage(trace: Trace) -> str | None:
+        """Require an actual diff review and a post-review check after edits."""
+        mutations = {"write_file", "edit_file", "apply_patch"}
+        last_mutation = next(
+            (index for index in range(len(trace.tool_calls) - 1, -1, -1)
+             if trace.tool_calls[index][0] in mutations
+             and trace.tool_calls[index][2].startswith(("保存しました:", "変更しました:"))),
+            None,
+        )
+        if last_mutation is None:
+            return None
+        review = next(
+            (index for index in range(last_mutation + 1, len(trace.tool_calls))
+             if trace.tool_calls[index][0] == "review_changes"),
+            None,
+        )
+        if review is None:
+            return "review"
+        validation = next(
+            ((name, result) for name, _, result in reversed(trace.tool_calls[review + 1:])
+             if name in {"run_command", "check_python"}),
+            None,
+        )
+        if validation is None:
+            return "verify"
+        name, result = validation
+        if name == "run_command":
+            if not re.search(r"(?m)^終了コード: 0\s*$", result):
+                return "verify"
+        elif not result.startswith("Python構文OK:"):
+            return "verify"
+        return None
 
     def _think_then_answer(self, scratch: list[dict],
                            trace: Trace) -> tuple[str | None, str]:

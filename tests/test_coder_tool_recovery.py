@@ -81,6 +81,12 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
         self.assertNotIn("<tool>", answer)
         self.assertFalse(Path(self.temp_dir.name, "game.py").exists())
 
+    def test_completion_gate_tool_name_is_parseable(self):
+        self.assertEqual(
+            self.agent._extract_tool_call("<tool>review_changes</tool>"),
+            ("review_changes", ""),
+        )
+
     def test_invalid_plan_is_not_reported_as_shared(self):
         result = self.coder_tools.update_plan("")
 
@@ -224,6 +230,67 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
         for name in ("calc", "date", "smart_search"):
             self.assertNotIn(name, registry.names())
 
+    def test_auto_coder_requires_review_and_post_review_verification(self):
+        self.agent.config.coder_auto = True
+        self.coder_tools.auto_approved = True
+        prompts = []
+        outputs = iter([
+            "<tool>write_file: app.py :: print('ready')\n</tool>",
+            "ファイルを作成しました。",
+            "<tool>review_changes</tool>",
+            "差分を確認しました。",
+            "<tool>run_command: echo verified</tool>",
+            "変更を確認し、検証コマンドも成功しました。",
+        ])
+
+        def generate(scratch, **_kwargs):
+            prompts.append([dict(message) for message in scratch])
+            return next(outputs)
+
+        self.agent._generate = generate
+        trace = Trace()
+
+        answer = self.agent._answer_or_tool([], trace)
+
+        self.assertEqual(
+            [name for name, _, _ in trace.tool_calls],
+            ["write_file", "review_changes", "run_command"],
+        )
+        self.assertTrue(any("review_changes" in message["content"]
+                            for messages in prompts for message in messages))
+        self.assertTrue(any("run_command" in message["content"]
+                            for messages in prompts for message in messages))
+        self.assertIn("終了コード: 0", trace.tool_calls[-1][2])
+        self.assertEqual(answer, "変更を確認し、検証コマンドも成功しました。")
+
+    def test_auto_coder_does_not_claim_success_when_review_is_skipped(self):
+        self.agent.config.coder_auto = True
+        outputs = iter([
+            "<tool>write_file: app.py :: print('ready')\n</tool>",
+            "変更完了です。",
+            "レビューは後で行います。完了しました。",
+        ])
+        self.agent._generate = lambda _scratch, **_kwargs: next(outputs)
+
+        answer = self.agent._answer_or_tool([], Trace())
+
+        self.assertIn("差分レビューを完了できませんでした", answer)
+        self.assertNotIn("変更完了です", answer)
+
+    def test_failed_post_review_command_does_not_unlock_completion(self):
+        trace = Trace(tool_calls=[
+            ("write_file", "app.py :: print('ready')", "保存しました: app.py"),
+            ("review_changes", "", "--- a/app.py\n+++ b/app.py"),
+            ("run_command", "pytest", "終了コード: 1\nテスト失敗"),
+        ])
+
+        self.assertEqual(self.agent._coder_completion_stage(trace), "verify")
+
+        trace.tool_calls.append(
+            ("run_command", "pytest", "終了コード: 0\nOK"))
+
+        self.assertIsNone(self.agent._coder_completion_stage(trace))
+
     def test_auto_coder_keeps_write_tools_enabled_after_project_info(self):
         self.agent.engine = CaptureEngine()
         self.agent.config.coder_auto = True
@@ -241,11 +308,14 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
     def test_full_auto_turn_writes_file_after_project_info(self):
         self.agent.engine = CaptureEngine()
         self.agent.config.coder_auto = True
+        self.coder_tools.auto_approved = True
         self.agent._improve_answer = lambda answer, _issues, _scratch: answer
         generated_messages = []
         outputs = iter([
             "<tool>write_file: index.html :: <!doctype html>\n"
             "<html><body>企業サイト</body></html></tool>",
+            "<tool>review_changes</tool>",
+            "<tool>run_command: echo verified</tool>",
             "index.html を作成しました。",
         ])
 
@@ -262,7 +332,7 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
             "<!doctype html>\n<html><body>企業サイト</body></html>",
         )
         self.assertEqual([tool for tool, _, _ in trace.tool_calls],
-                         ["project_info", "write_file"])
+                         ["project_info", "write_file", "review_changes", "run_command"])
         self.assertEqual(answer, "index.html を作成しました。")
         latest_user_message = next(
             message for message in generated_messages[0]
@@ -384,10 +454,13 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
 
     def test_auto_mode_executes_trailing_tool_call_after_prose(self):
         self.agent.config.coder_auto = True
+        self.coder_tools.auto_approved = True
         self.agent._turn_text = "サイトを作って"
         outputs = iter([
             "ファイルを保存します。\n"
             "<tool>write_file: index.html :: <!doctype html><title>企業</title></tool>",
+            "<tool>review_changes</tool>",
+            "<tool>run_command: echo verified</tool>",
             "index.html を保存しました。",
         ])
         self.agent._generate = lambda _scratch, **_kwargs: next(outputs)
@@ -443,9 +516,12 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
 
     def test_auto_coding_request_retries_as_file_tool_after_prose(self):
         self.agent.config.coder_auto = True
+        self.coder_tools.auto_approved = True
         outputs = iter([
             "こちらがHTMLです。\n<html><body>会社サイト</body></html>",
             "<tool>write_file: index.html :: <!doctype html>\n<html>done</html></tool>",
+            "<tool>review_changes</tool>",
+            "<tool>run_command: echo verified</tool>",
             "index.html を作成しました。",
         ])
         progress = []
@@ -460,12 +536,16 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
             Path(self.temp_dir.name, "index.html").read_text(encoding="utf-8"),
             "<!doctype html>\n<html>done</html>",
         )
-        self.assertEqual([tool for tool, _, _ in trace.tool_calls], ["write_file"])
+        self.assertEqual(
+            [tool for tool, _, _ in trace.tool_calls],
+            ["write_file", "review_changes", "run_command"],
+        )
         self.assertEqual(answer, "index.html を作成しました。")
         self.assertTrue(any("実装を要求" in message for message in progress))
 
     def test_auto_coding_recognizes_copy_request_and_writes_original_site(self):
         self.agent.config.coder_auto = True
+        self.coder_tools.auto_approved = True
         request = ("じゃあ、Netflixという有名サービスの、Webサイトをパクって、"
                    "演出から、UIまで、全部パクって。")
         self.assertTrue(self.agent._is_coder_action_request(request))
@@ -475,6 +555,8 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
             "検索結果に基づく構成案とHTMLコードを以下に示します。",
             ("<tool>write_file: index.html :: <!doctype html>"
              "<title>Streamly</title><main>オリジナル動画サービス</main></tool>"),
+            "<tool>review_changes</tool>",
+            "<tool>run_command: echo verified</tool>",
             "オリジナルの動画サービスサイトを作業フォルダに保存しました。",
         ])
         prompts = []
@@ -492,13 +574,14 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
             "<main>オリジナル動画サービス</main>",
         )
         self.assertEqual([name for name, _, _ in trace.tool_calls],
-                         ["search", "write_file"])
+                         ["search", "write_file", "review_changes", "run_command"])
         self.assertEqual(answer, "オリジナルの動画サービスサイトを作業フォルダに保存しました。")
         self.assertTrue(any("write_file" in message["content"]
                             for messages in prompts for message in messages))
 
     def test_auto_coding_recovers_after_project_info_and_two_prose_replies(self):
         self.agent.config.coder_auto = True
+        self.coder_tools.auto_approved = True
         trace = Trace()
         scratch = []
         self.agent._use_tool("project_info", "", scratch, trace)
@@ -506,6 +589,8 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
             "プロジェクト情報を確認しました。企業サイトを作成します。",
             "以下のHTMLを使えます。\n<html><body>企業サイト</body></html>",
             "<tool>write_file: index.html :: <!doctype html>\n<html><body>会社</body></html></tool>",
+            "<tool>review_changes</tool>",
+            "<tool>run_command: echo verified</tool>",
             "index.html を保存しました。",
         ])
         prompts = []
@@ -526,9 +611,12 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
             "<!doctype html>\n<html><body>会社</body></html>",
         )
         self.assertEqual([tool for tool, _, _ in trace.tool_calls],
-                         ["project_info", "write_file"])
+                         ["project_info", "write_file", "review_changes", "run_command"])
         self.assertEqual(answer, "index.html を保存しました。")
-        self.assertIn("index.html に完成したページ", prompts[-2][-1]["content"])
+        self.assertTrue(any(
+            "index.html に完成したページ" in message["content"]
+            for messages in prompts for message in messages
+        ))
         self.assertTrue(any("実装を再試行" in message for message in progress))
 
     def test_auto_coding_request_never_returns_unsaved_source_as_success(self):
