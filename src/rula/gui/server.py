@@ -67,7 +67,8 @@ def _tool_words() -> list[str]:
     from ..tools.base import ALIASES
     coder_tool_words = {
         "list_files", "find_files", "find_symbol", "read_file", "read_files",
-        "file_outline", "search_code", "check_python", "project_info", "update_plan",
+        "file_outline", "search_code", "check_python", "project_info", "project_memory",
+        "update_plan",
         "git_status", "git_diff", "ask_user", "write_file", "edit_file",
         "apply_patch", "review_changes", "run_command",
     }
@@ -107,6 +108,7 @@ _TOOL_LABELS = {"search": "検索しています", "deep_search": "ページを�
                 "file_outline": "ファイル構造を確認しています", "read_files": "複数ファイルを読んでいます",
                 "check_python": "Python構文を検査しています",
                 "search_code": "コードを検索しています", "project_info": "プロジェクト情報を確認しています",
+                "project_memory": "プロジェクト記憶を確認しています",
                 "update_plan": "作業計画を更新しています", "git_status": "Git状態を確認しています",
                 "git_diff": "Git差分を確認しています",
                 "write_file": "ファイルを保存しています", "edit_file": "ファイルを編集しています",
@@ -519,7 +521,8 @@ async def chat(req: ChatIn, request: Request):
             raise HTTPException(403, "オートモードの作業フォルダ確認が必要です。")
         try:
             coder_tools = CoderTools(
-                req.workspace, req.coder_mode, auto_approved=req.auto_approved)
+                req.workspace, req.coder_mode, auto_approved=req.auto_approved,
+                request_text=text, memory_root=os.path.join(DATA, "project-memory"))
         except (OSError, ValueError) as exc:
             raise HTTPException(400, f"作業フォルダを開けません: {exc}") from exc
     else:
@@ -595,9 +598,11 @@ async def chat(req: ChatIn, request: Request):
                     lambda message: emit("status", text=message)
                     if req.profile == "coder" else None)
                 if isinstance(agent, CoderAgent):
+                    memory_context = coder_tools.project_memory.prompt() if coder_tools else ""
                     agent.configure_request(
                         req.coder_mode, req.coder_effort,
-                        coder_tools.registry() if coder_tools else default_registry())
+                        coder_tools.registry() if coder_tools else default_registry(),
+                        request_text=text, memory_context=memory_context)
                 else:
                     agent.config.extra_system = None
                     agent.config.coder_auto = False
@@ -656,6 +661,21 @@ async def chat(req: ChatIn, request: Request):
                 elapsed = round(time.perf_counter() - started, 1)
                 tools = [{"name": n, "arg": a} for n, a, _ in trace.tool_calls]
                 files_changed = coder_tools.changed_files() if coder_tools else []
+                if (coder_tools and req.coder_mode in ("auto", "plan")
+                        and not coder_tools.memory_cleared):
+                    checks = [
+                        f"{entry.get('detail', '')}: {entry.get('result', '')}"
+                        for entry in activity_log
+                        if entry.get("name") in ("run_command", "check_python")
+                        and entry.get("phase") == "done"
+                    ]
+                    try:
+                        coder_tools.project_memory.record_task(
+                            question, files_changed, checks,
+                            plan=chat_doc.get("coder_plan", []), interrupted=stopped)
+                    except (OSError, ValueError) as exc:
+                        log.exception("could not save project memory")
+                        answer += f"\n\nプロジェクト記憶の保存に失敗しました: {exc}"
                 now = time.time()
                 chat_doc["messages"].append({"role": "user", "content": question,
                                              "thumb": req.thumb, "time": now})

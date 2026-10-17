@@ -12,6 +12,8 @@ from difflib import unified_diff
 from pathlib import Path, PureWindowsPath
 from typing import Callable
 
+from ..coder_workflow import CoderWorkflow
+from ..coder_memory import ProjectMemory
 from .base import Tool, ToolRegistry
 
 _SKIP_DIRS = {
@@ -25,6 +27,18 @@ _MAX_OUTPUT_CHARS = 20_000
 _MAX_BATCH_READ_FILES = 8
 _MAX_PYTHON_CHECK_FILES = 20
 _MAX_FIND_FILES = 200
+_MEMORY_WRITE_REQUEST = re.compile(
+    r"覚えて|記憶(?:して|に残|へ保存)|メモ(?:して|を残|に保存)|"
+    r"記録して|次回(?:も|は)?(?:使|覚)|remember this|save (?:this|a note)",
+    re.I,
+)
+_MEMORY_FORGET_REQUEST = re.compile(
+    r"記憶(?:を|の)(?:削除|消|忘)"
+    r"(?!しない|しません|しなく|したくない|せず|さない|さず|"
+    r"れない|れず|れません|ないで)|"
+    r"forget (?:the )?(?:project )?memory",
+    re.I,
+)
 _TEXT_SUFFIXES = {
     ".c", ".cc", ".cfg", ".cpp", ".cs", ".css", ".go", ".h", ".hpp", ".html",
     ".ini", ".java", ".js", ".json", ".jsx", ".kt", ".md", ".php", ".ps1",
@@ -146,17 +160,36 @@ def _stop_process_tree(process: subprocess.Popen) -> bool:
 
 
 class CoderTools:
-    def __init__(self, workspace: str, mode: str, auto_approved: bool = False):
+    def __init__(self, workspace: str, mode: str, auto_approved: bool = False,
+                 request_text: str = "", memory_root: str | None = None):
         self.workspace = Path(workspace).resolve(strict=True)
         if not self.workspace.is_dir():
             raise ValueError("作業フォルダが見つかりません。")
         self.mode = mode
         self.auto_approved = auto_approved
+        self.project_memory = ProjectMemory(
+            self.workspace,
+            memory_root or os.path.join(
+                os.environ.get("APPDATA") or os.path.expanduser("~"),
+                "RulaCoder", "project-memory"))
+        self._memory_write_allowed = bool(_MEMORY_WRITE_REQUEST.search(request_text))
+        self._memory_forget_allowed = bool(_MEMORY_FORGET_REQUEST.search(request_text))
+        self.memory_cleared = False
+        self._website_request = CoderWorkflow.asks_for_website(request_text)
+        self._workspace_started_empty = self._is_workspace_empty()
         self.interact: Callable[..., str] | None = None
         self.on_plan: Callable[[list[dict[str, str]]], None] | None = None
         self._originals: dict[str, str | None] = {}
         self._plan: list[dict[str, str]] = []
         self._inspection_count = 0
+        self._explicitly_read: set[Path] = set()
+
+    def _is_workspace_empty(self) -> bool:
+        for root, dirs, files in os.walk(self.workspace, followlinks=False):
+            dirs[:] = [name for name in dirs if name not in _SKIP_DIRS]
+            if any(not (Path(root) / name).is_symlink() for name in files):
+                return False
+        return True
 
     def _path(self, relative: str) -> Path:
         if "\0" in relative:
@@ -207,6 +240,9 @@ class CoderTools:
         registry.register(Tool(
             "project_info", "プロジェクト構成・開発指示・変更状態を確認する",
             "引数なし", self.project_info))
+        registry.register(Tool(
+            "project_memory", "この作業フォルダの過去の作業記録を読む。ユーザーが明示したメモだけ保存する",
+            "read、remember :: 保存するメモ、または forget", self.project_memory_tool))
         registry.register(Tool(
             "update_plan", "現在の作業計画と進捗をユーザーに共有する",
             "引数なし (現在の計画を維持) または JSON配列: "
@@ -322,12 +358,30 @@ class CoderTools:
         except (OSError, UnicodeError) as exc:
             return f"ファイルを読めません ({path_arg}): {exc}"
         if end_line is None:
+            self._explicitly_read.add(path)
+        if end_line is None:
             return content
         lines = content.splitlines()
         if start_line > len(lines):
             return f"開始行がファイルの範囲外です (全 {len(lines)} 行)。"
         return "\n".join(f"{i}: {line}" for i, line in enumerate(
             lines[start_line - 1:end_line], start_line))
+
+    def project_memory_tool(self, argument: str) -> str:
+        action, separator, note = argument.partition(" :: ")
+        if action.strip().lower() == "read":
+            return self.project_memory.prompt() or "この作業フォルダの記憶はまだありません。"
+        if action.strip().lower() == "forget" and not separator:
+            if not self._memory_forget_allowed:
+                return "削除しませんでした。ユーザーが今回の依頼で記憶の削除を明示した場合だけ実行できます。"
+            self.project_memory.clear()
+            self.memory_cleared = True
+            return "この作業フォルダの記憶を削除しました。"
+        if action.strip().lower() != "remember" or not separator:
+            return "形式エラー: read または remember :: 保存するメモ を指定してください。"
+        if not self._memory_write_allowed:
+            return "保存しませんでした。ユーザーが今回の依頼で記憶を明示的に求めた場合だけ保存できます。"
+        return self.project_memory.remember(note)
 
     def find_symbol(self, symbol: str) -> str:
         symbol = symbol.strip()
@@ -554,11 +608,96 @@ class CoderTools:
             entries.append("… (構成表示の上限)")
         return "\n".join(entries)
 
+    def _project_checks(self) -> list[str]:
+        files: set[str] = set()
+        basenames: set[str] = set()
+        for root, dirs, names in os.walk(self.workspace, followlinks=False):
+            dirs[:] = [name for name in dirs
+                       if name not in _SKIP_DIRS and not (Path(root) / name).is_symlink()]
+            for name in names:
+                path = Path(root) / name
+                if path.is_symlink():
+                    continue
+                relative = path.relative_to(self.workspace).as_posix()
+                files.add(relative)
+                basenames.add(name.casefold())
+
+        checks: list[str] = []
+        package_files = [name for name in files
+                         if Path(name).name.casefold() == "package.json"]
+        for package_file in sorted(package_files)[:4]:
+            try:
+                package = json.loads(self._read_text(self._path(package_file)))
+            except (OSError, UnicodeError, ValueError):
+                continue
+            scripts = package.get("scripts", {}) if isinstance(package, dict) else {}
+            if not isinstance(scripts, dict):
+                continue
+            directory = Path(package_file).parent.as_posix()
+            prefix = "" if directory == "." else f"cd {directory} && "
+            lock_names = {
+                (Path(package_file).parent / name).as_posix()
+                for name in ("pnpm-lock.yaml", "yarn.lock", "bun.lockb", "bun.lock",
+                             "package-lock.json")
+            }
+            manager = next((Path(name).name for name in sorted(lock_names)
+                            if name in files), "package-lock.json")
+            runner = ("pnpm" if manager == "pnpm-lock.yaml" else
+                      "yarn" if manager == "yarn.lock" else
+                      "bun" if manager.startswith("bun.lock") else "npm")
+            for script in ("test", "build", "lint", "typecheck", "check"):
+                if isinstance(scripts.get(script), str):
+                    checks.append(f"{prefix}{runner} run {script}")
+        if "cargo.toml" in basenames:
+            checks.append("cargo test")
+        if "go.mod" in basenames:
+            checks.append("go test ./...")
+        python_files = [name for name in files if name.endswith(".py")]
+        if "pyproject.toml" in basenames or python_files:
+            pytest_configured = "pytest.ini" in basenames or "tox.ini" in basenames
+            for name in files:
+                if Path(name).name != "pyproject.toml":
+                    continue
+                try:
+                    if self._path(name).stat().st_size <= _MAX_FILE_BYTES:
+                        pytest_configured |= "pytest" in self._read_text(
+                            self._path(name)).casefold()
+                except (OSError, UnicodeError):
+                    continue
+            if pytest_configured:
+                checks.append("python -m pytest")
+            elif any(
+                    Path(name).name.startswith("test_") and name.endswith(".py")
+                    for name in files):
+                checks.append("python -m unittest discover")
+            elif python_files:
+                checks.append("Python変更はcheck_pythonで構文検査")
+        dotnet_projects = sorted(
+            name for name in files
+            if name.casefold().endswith((".sln", ".slnx", ".csproj", ".fsproj", ".vbproj")))
+        if dotnet_projects:
+            checks.append(f'dotnet test "{dotnet_projects[0]}"')
+        if "pom.xml" in basenames:
+            checks.append("mvn test")
+        if "gradlew" in basenames:
+            checks.append(".\\gradlew test")
+        elif "build.gradle" in basenames or "build.gradle.kts" in basenames:
+            checks.append("gradle test")
+        if "makefile" in basenames:
+            checks.append("make test (if the Makefile defines a test target)")
+        return list(dict.fromkeys(checks))[:12]
+
     def _project_info(self, argument: str = "") -> str:
         if argument.strip():
             return "このツールに引数は不要です。"
         tree_section = f"\n--- ファイル構成 ---\n{self._project_tree()}"
-        parts = [f"作業フォルダ: {self.workspace}", tree_section]
+        checks = self._project_checks()
+        checks_section = (
+            "\n--- 検証候補 (変更に関連するものだけ実行) ---\n"
+            + ("\n".join(f"- {command}" for command in checks)
+               if checks else "- 固有のテストコマンドは検出できません。関連テストまたは対象言語の静的検査を確認してください。")
+        )
+        parts = [f"作業フォルダ: {self.workspace}", tree_section, checks_section]
         remaining = max(0, 12_000 - sum(map(len, parts)))
         project_files = list(_PROJECT_FILES)
         for root, dirs, files in os.walk(self.workspace, followlinks=False):
@@ -715,6 +854,7 @@ class CoderTools:
             original = self._read_text(path)
         except (OSError, UnicodeError) as exc:
             return f"ファイルを読めません ({relative}): {exc}"
+        self._explicitly_read.add(path)
         original, old, new = self._match_newlines(original, old, new)
         occurrences = original.count(old)
         if occurrences != 1:
@@ -757,6 +897,7 @@ class CoderTools:
                 original = self._read_text(path)
             except (OSError, UnicodeError) as exc:
                 return f"ファイルを読めません ({blocks[index]}): {exc}"
+            self._explicitly_read.add(path)
             original, old, new = self._match_newlines(original, old, new)
             if original.count(old) != 1:
                 return (f"適用を中止しました ({blocks[index]}): 旧内容は"
@@ -799,12 +940,22 @@ class CoderTools:
         return self._path(relative)
 
     def _write_files(self, changes: list[tuple[Path, str]]) -> str:
+        if (self._website_request and self._workspace_started_empty
+                and not self._originals
+                and not any(path.name.casefold() == "index.html"
+                            for path, _ in changes)):
+            return ("サイト依頼の最初の変更には、ブラウザーで開ける index.html が必要です。"
+                    "app.pyだけではWebサイトになりません。index.htmlを入口としてHTML/CSS/"
+                    "JavaScriptで作成してください。まだファイルは変更していません。")
         prepared: list[tuple[Path, str, bytes, bytes | None]] = []
         originals: dict[str, str | None] = {}
         total_bytes = 0
         for path, content in changes:
             if path.exists() and not path.is_file():
                 return f"ファイルではなくフォルダです: {path.relative_to(self.workspace).as_posix()}"
+            if path.is_file() and path not in self._explicitly_read:
+                return ("既存ファイルの全文上書きを中止しました。先に read_file / read_files で"
+                        f"内容を確認してください: {path.relative_to(self.workspace).as_posix()}")
             try:
                 original_bytes = path.read_bytes() if path.exists() else None
                 original = original_bytes.decode("utf-8") if original_bytes is not None else None
@@ -882,6 +1033,7 @@ class CoderTools:
 
         for relative, original in originals.items():
             self._originals.setdefault(relative, original)
+        self._explicitly_read.update(path for path, _, _, _ in prepared)
         return "保存しました: " + ", ".join(
             path.relative_to(self.workspace).as_posix() for path, _, _, _ in prepared)
 

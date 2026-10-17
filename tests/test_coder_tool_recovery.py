@@ -164,6 +164,30 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
 
         self.assertTrue(result.startswith("調査上限:"))
 
+    def test_empty_website_request_rejects_python_only_first_write(self):
+        tools = CoderTools(
+            self.temp_dir.name, "auto", request_text="Discord向けのsiteを作って")
+
+        rejected = tools.write_file("app.py :: def broken(:\n    pass\n")
+
+        self.assertIn("index.html", rejected)
+        self.assertFalse(Path(self.temp_dir.name, "app.py").exists())
+        self.assertFalse(tools.changed_files())
+
+        saved = tools.write_file("index.html :: <!doctype html><title>Site</title>")
+
+        self.assertEqual(saved, "保存しました: index.html")
+        self.assertTrue(Path(self.temp_dir.name, "index.html").is_file())
+
+    def test_site_request_is_explicit_in_dedicated_coder_prompt(self):
+        from rula.coder_workflow import CoderWorkflow
+
+        prompt = CoderWorkflow("auto", "medium").system_prompt(
+            "Create a website in this folder")
+
+        self.assertIn("index.html", prompt)
+        self.assertIn("app.pyだけ", prompt)
+
     def test_project_info_includes_bounded_relative_file_structure(self):
         project = Path(self.temp_dir.name)
         (project / "src" / "feature").mkdir(parents=True)
@@ -186,6 +210,29 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
         self.assertIn("  - test_service.py", result)
         self.assertNotIn("node_modules", result)
         self.assertNotIn("ignored.js", result)
+
+    def test_project_info_recommends_native_checks_for_detected_toolchains(self):
+        project = Path(self.temp_dir.name)
+        (project / "package.json").write_text(
+            '{"scripts":{"test":"vitest run","build":"vite build"}}',
+            encoding="utf-8")
+        (project / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n",
+                                                encoding="utf-8")
+        (project / "pyproject.toml").write_text(
+            "[tool.pytest.ini_options]\ntestpaths = ['tests']\n",
+            encoding="utf-8")
+        (project / "tests").mkdir()
+        (project / "tests" / "test_api.py").write_text(
+            "def test_api():\n    assert True\n", encoding="utf-8")
+        (project / "Cargo.toml").write_text(
+            "[package]\nname='demo'\nversion='0.1.0'\n", encoding="utf-8")
+
+        result = self.coder_tools.project_info()
+
+        self.assertIn("pnpm run test", result)
+        self.assertIn("pnpm run build", result)
+        self.assertIn("python -m pytest", result)
+        self.assertIn("cargo test", result)
 
     def test_find_files_finds_matching_files_without_following_skipped_dirs(self):
         Path(self.temp_dir.name, "src").mkdir()
@@ -309,7 +356,7 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
             ("run_command", "pytest", "終了コード: 1\nテスト失敗"),
         ])
 
-        self.assertEqual(self.agent._coder_completion_stage(trace), "verify")
+        self.assertEqual(self.agent._coder_completion_stage(trace), "repair")
 
         trace.tool_calls.append(
             ("run_command", "pytest", "終了コード: 0\nOK"))
@@ -324,6 +371,47 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
         ])
 
         self.assertEqual(self.agent._coder_completion_stage(trace), "verify")
+
+    def test_failed_python_syntax_check_requests_repair_not_generic_verification(self):
+        trace = Trace(tool_calls=[
+            ("write_file", "app.py :: def broken(:\n    pass", "保存しました: app.py"),
+            ("review_changes", "", "--- a/app.py\n+++ b/app.py"),
+            ("check_python", "app.py", "Python構文エラー:\napp.py:1:12: invalid syntax"),
+        ])
+
+        self.assertEqual(self.agent._coder_completion_stage(trace), "repair")
+
+    def test_auto_coder_repairs_syntax_failure_then_rechecks(self):
+        self.agent.config.coder_auto = True
+        outputs = iter([
+            "<tool>write_file: app.py :: def broken(:\n    pass</tool>",
+            "<tool>review_changes</tool>",
+            "<tool>check_python: app.py</tool>",
+            "<tool>write_file: app.py :: print('fixed')</tool>",
+            "<tool>review_changes</tool>",
+            "<tool>check_python: app.py</tool>",
+            "構文を修正して検査しました。",
+        ])
+        prompts = []
+
+        def generate(scratch, **_kwargs):
+            prompts.append([dict(message) for message in scratch])
+            return next(outputs)
+
+        self.agent._generate = generate
+
+        answer = self.agent._answer_or_tool([], Trace())
+
+        self.assertEqual(
+            Path(self.temp_dir.name, "app.py").read_text(encoding="utf-8"),
+            "print('fixed')",
+        )
+        self.assertEqual(answer, "構文を修正して検査しました。")
+        self.assertTrue(any(
+            "Python構文エラー" in message["content"] and "ソースを修正"
+            in message["content"]
+            for messages in prompts for message in messages
+        ))
 
     def test_test_build_and_static_check_commands_unlock_completion(self):
         for command in (
@@ -351,7 +439,7 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
             ("run_command", "echo done", "終了コード: 0\ndone"),
         ])
 
-        self.assertEqual(self.agent._coder_completion_stage(trace), "verify")
+        self.assertEqual(self.agent._coder_completion_stage(trace), "repair")
 
     def test_auto_coder_keeps_write_tools_enabled_after_project_info(self):
         self.agent.engine = CaptureEngine()
@@ -478,6 +566,14 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
         path = Path(self.temp_dir.name, "crlf.txt")
         path.write_bytes(b"before\r\nsecond\r\n")
 
+        rejected = self.coder_tools.write_file("crlf.txt :: after\nsecond\n")
+        self.assertIn("先に read_file / read_files", rejected)
+        self.assertIn(
+            "既存の内容を read_file / read_files で全文読み",
+            self.agent._tool_result_prompt(rejected, "write_file"),
+        )
+        self.assertEqual(path.read_bytes(), b"before\r\nsecond\r\n")
+        self.coder_tools.read_file("crlf.txt")
         result = self.coder_tools.write_file("crlf.txt :: after\nsecond\n")
 
         self.assertTrue(result.startswith("保存しました:"))
