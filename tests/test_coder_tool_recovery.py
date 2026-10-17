@@ -26,6 +26,24 @@ class CaptureEngine:
         return "完了しました。"
 
 
+class ContextOverflowEngine:
+    display_name = "context test"
+    supports_thinking = False
+    hit_token_limit = False
+
+    def __init__(self, overflow_when=None):
+        self.overflow_when = overflow_when
+        self.calls = []
+
+    def generate(self, messages, _config):
+        self.calls.append(messages)
+        if self.overflow_when is None or self.overflow_when(messages):
+            raise RuntimeError(
+                'llama-server error: {"type":"exceed_context_size_error",'
+                '"n_prompt_tokens":16449,"n_ctx":16384}')
+        return "完了しました。"
+
+
 class ToolProtocolRecoveryTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -161,6 +179,46 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
 
         self.assertEqual(answer, "完了しました。")
         self.assertFalse(engine.config.stream)
+
+    def test_context_overflow_retries_without_old_history_and_keeps_current_work(self):
+        engine = ContextOverflowEngine(
+            lambda messages: any("古い会話" in message["content"] for message in messages)
+        )
+        self.agent.engine = engine
+        self.agent.history.extend([
+            Turn("user", "古い会話の依頼"),
+            Turn("assistant", "古い会話の回答"),
+            Turn("user", "今回の依頼"),
+        ])
+        progress = []
+        self.agent.on_progress = progress.append
+        tool_context = [{"role": "user", "content": "現在のツール結果"}]
+
+        answer = self.agent._generate(tool_context)
+
+        self.assertEqual(answer, "完了しました。")
+        self.assertEqual(len(engine.calls), 2)
+        self.assertTrue(any("古い会話" in message["content"]
+                            for message in engine.calls[0]))
+        self.assertFalse(any("古い会話" in message["content"]
+                             for message in engine.calls[1]))
+        self.assertTrue(any("今回の依頼" in message["content"]
+                            for message in engine.calls[1]))
+        self.assertTrue(any("現在のツール結果" in message["content"]
+                            for message in engine.calls[1]))
+        self.assertTrue(any("以前の会話を一部省略" in message["content"]
+                            for message in engine.calls[1]))
+        self.assertEqual(len(self.agent.history), 3)
+        self.assertTrue(progress)
+
+    def test_context_overflow_without_droppable_history_has_actionable_error(self):
+        self.agent.engine = ContextOverflowEngine()
+        self.agent.history.append(Turn("user", "大きすぎる今回の依頼"))
+
+        with self.assertRaisesRegex(RuntimeError, "今回の依頼と必須指示だけで"):
+            self.agent._generate([])
+
+        self.assertEqual(len(self.agent.engine.calls), 1)
 
     def test_native_coder_reasoning_uses_separate_bounded_budget(self):
         engine = CaptureEngine()
