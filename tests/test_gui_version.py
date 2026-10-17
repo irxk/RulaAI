@@ -72,16 +72,30 @@ class GuiVersionTests(unittest.TestCase):
         )
 
         agent.configure_request(
-            "auto", "large", default_registry(), memory_context="再開メモ")
+            "auto", "large", default_registry(),
+            request_text="3DのWebサイトを作って", memory_context="再開メモ")
 
         self.assertTrue(agent.config.coder_auto)
         self.assertFalse(agent.config.stream)
         self.assertFalse(agent.config.preview)
         self.assertEqual(agent.config.max_tool_calls, 32)
         self.assertEqual(agent.config.max_new_tokens, 6144)
-        self.assertTrue(agent.config.thinking)
+        self.assertFalse(agent.config.thinking)
         self.assertIn("RulaCoder専用", agent.config.extra_system)
         self.assertIn("再開メモ", agent.config.extra_system)
+
+    def test_large_coder_keeps_reasoning_for_non_action_requests(self):
+        agent = CoderAgent(
+            SimpleNamespace(supports_thinking=True),
+            AgentConfig(),
+            default_registry(),
+        )
+
+        agent.configure_request(
+            "chat", "large", default_registry(),
+            request_text="この実装の仕組みを説明して")
+
+        self.assertTrue(agent.config.thinking)
 
     def test_coder_profile_gets_separate_agent_with_shared_model_engine(self):
         engine = SimpleNamespace(supports_thinking=True)

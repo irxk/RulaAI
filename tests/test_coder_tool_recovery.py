@@ -103,6 +103,34 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
         self.assertNotIn("source only", answer)
         self.assertFalse(Path(self.temp_dir.name, "index.html").exists())
 
+    def test_auto_mode_retries_source_answer_as_a_file_tool_call(self):
+        self.agent.config.coder_auto = True
+        self.agent.config.max_tool_calls = 3
+        self.agent._turn_text = "3DのWebサイトを作って"
+        outputs = iter([
+            "<!doctype html><html><body>source only</body></html>",
+            "<tool>write_file: index.html :: <!doctype html><html><body>done</body></html></tool>",
+            "index.htmlを作成しました。",
+        ])
+        prompts = []
+
+        def generate(scratch, **_kwargs):
+            prompts.append([dict(message) for message in scratch])
+            return next(outputs)
+
+        self.agent._generate = generate
+        self.agent._coder_completion_stage = lambda _trace: None
+        trace = Trace()
+
+        answer = self.agent._answer_or_tool([], trace)
+
+        self.assertEqual(answer, "index.htmlを作成しました。")
+        self.assertEqual(
+            Path(self.temp_dir.name, "index.html").read_text(encoding="utf-8"),
+            "<!doctype html><html><body>done</body></html>",
+        )
+        self.assertIn("次の応答は説明文ではなく", prompts[1][-1]["content"])
+
     def test_failed_mutation_does_not_count_as_a_file_write(self):
         trace = Trace(tool_calls=[
             ("write_file", "index.html", "形式エラー: 相対パス :: ファイル全文")
