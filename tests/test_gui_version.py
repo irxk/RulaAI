@@ -21,6 +21,16 @@ from rula.version import __version__
 
 
 class GuiVersionTests(unittest.TestCase):
+    def test_failed_write_activity_is_not_marked_complete(self):
+        self.assertFalse(server._coder_tool_succeeded(
+            "write_file", "形式エラー: 相対パス :: ファイル全文"))
+        self.assertTrue(server._coder_tool_succeeded(
+            "write_file", "保存しました: index.html"))
+        self.assertEqual(
+            server._coder_activity_result("write_file", "形式エラー: 引数を確認してください。"),
+            "形式エラー: 引数を確認してください。",
+        )
+
     def test_local_server_activity_shows_readiness_instead_of_generic_running(self):
         result = server._coder_activity_result(
             "run_command",
@@ -37,6 +47,23 @@ class GuiVersionTests(unittest.TestCase):
         self.assertIn("差分レビュー", workflow)
         self.assertIn("無関係な成功コマンド", workflow)
 
+    def test_coder_prompt_classifies_different_software_tasks(self):
+        cases = {
+            "login is broken; fix the error": "bugfix",
+            "既存APIに検索機能を追加して": "feature",
+            "Add tests for the parser": "test",
+            "READMEの手順を直して": "documentation",
+            "コードをリファクタして整理": "refactor",
+            "Discord用のwebsiteを作って": "website",
+        }
+        for request, expected in cases.items():
+            with self.subTest(request=request):
+                self.assertEqual(CoderWorkflow.classify_task(request), expected)
+                self.assertIn(
+                    f"依頼タイプ: {expected}",
+                    CoderWorkflow("auto", "medium").system_prompt(request),
+                )
+
     def test_dedicated_coder_agent_owns_its_mode_and_effort_policy(self):
         agent = CoderAgent(
             SimpleNamespace(supports_thinking=True),
@@ -44,7 +71,8 @@ class GuiVersionTests(unittest.TestCase):
             default_registry(),
         )
 
-        agent.configure_request("auto", "large", default_registry())
+        agent.configure_request(
+            "auto", "large", default_registry(), memory_context="再開メモ")
 
         self.assertTrue(agent.config.coder_auto)
         self.assertFalse(agent.config.stream)
@@ -53,6 +81,7 @@ class GuiVersionTests(unittest.TestCase):
         self.assertEqual(agent.config.max_new_tokens, 6144)
         self.assertTrue(agent.config.thinking)
         self.assertIn("RulaCoder専用", agent.config.extra_system)
+        self.assertIn("再開メモ", agent.config.extra_system)
 
     def test_coder_profile_gets_separate_agent_with_shared_model_engine(self):
         engine = SimpleNamespace(supports_thinking=True)
@@ -66,7 +95,7 @@ class GuiVersionTests(unittest.TestCase):
         self.assertIs(agent.engine, engine)
 
     def test_stream_guard_recognizes_each_new_coder_tool(self):
-        for name in ("find_files", "find_symbol", "read_files",
+        for name in ("find_files", "find_symbol", "read_files", "project_memory",
                      "file_outline", "check_python"):
             with self.subTest(name=name):
                 self.assertIn(name, server._TOOL_WORDS)
