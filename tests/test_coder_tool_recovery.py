@@ -1,7 +1,9 @@
 import os
 import sys
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -162,6 +164,29 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
 
         self.assertTrue(result.startswith("調査上限:"))
 
+    def test_project_info_includes_bounded_relative_file_structure(self):
+        project = Path(self.temp_dir.name)
+        (project / "src" / "feature").mkdir(parents=True)
+        (project / "tests").mkdir()
+        (project / "node_modules").mkdir()
+        (project / "src" / "feature" / "service.py").write_text(
+            "def run():\n    return True\n", encoding="utf-8")
+        (project / "tests" / "test_service.py").write_text(
+            "def test_run():\n    pass\n", encoding="utf-8")
+        (project / "node_modules" / "ignored.js").write_text(
+            "ignored", encoding="utf-8")
+
+        result = self.coder_tools.project_info()
+
+        self.assertIn("--- ファイル構成 ---", result)
+        self.assertIn("- src/", result)
+        self.assertIn("  - feature/", result)
+        self.assertIn("    - service.py", result)
+        self.assertIn("- tests/", result)
+        self.assertIn("  - test_service.py", result)
+        self.assertNotIn("node_modules", result)
+        self.assertNotIn("ignored.js", result)
+
     def test_find_files_finds_matching_files_without_following_skipped_dirs(self):
         Path(self.temp_dir.name, "src").mkdir()
         Path(self.temp_dir.name, "src", "main.py").write_text(
@@ -239,7 +264,7 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
             "ファイルを作成しました。",
             "<tool>review_changes</tool>",
             "差分を確認しました。",
-            "<tool>run_command: echo verified</tool>",
+            "<tool>run_command: python -m compileall .</tool>",
             "変更を確認し、検証コマンドも成功しました。",
         ])
 
@@ -291,6 +316,43 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
 
         self.assertIsNone(self.agent._coder_completion_stage(trace))
 
+    def test_arbitrary_successful_command_does_not_unlock_completion(self):
+        trace = Trace(tool_calls=[
+            ("write_file", "app.py :: print('ready')", "保存しました: app.py"),
+            ("review_changes", "", "--- a/app.py\n+++ b/app.py"),
+            ("run_command", "echo verified", "終了コード: 0\nverified"),
+        ])
+
+        self.assertEqual(self.agent._coder_completion_stage(trace), "verify")
+
+    def test_test_build_and_static_check_commands_unlock_completion(self):
+        for command in (
+            "pytest -q",
+            "python -m unittest discover -s tests",
+            "npm run build",
+            "cargo test",
+            r"C:\Python\python.exe -m compileall .",
+            "uv run pytest",
+        ):
+            with self.subTest(command=command):
+                trace = Trace(tool_calls=[
+                    ("write_file", "app.py :: print('ready')", "保存しました: app.py"),
+                    ("review_changes", "", "--- a/app.py\n+++ b/app.py"),
+                    ("run_command", command, "終了コード: 0\nOK"),
+                ])
+                self.assertIsNone(self.agent._coder_completion_stage(trace))
+
+    def test_latest_relevant_validation_result_controls_completion(self):
+        trace = Trace(tool_calls=[
+            ("write_file", "app.py :: print('ready')", "保存しました: app.py"),
+            ("review_changes", "", "--- a/app.py\n+++ b/app.py"),
+            ("run_command", "pytest -q", "終了コード: 0\nOK"),
+            ("run_command", "pytest -q", "終了コード: 1\nFAILED"),
+            ("run_command", "echo done", "終了コード: 0\ndone"),
+        ])
+
+        self.assertEqual(self.agent._coder_completion_stage(trace), "verify")
+
     def test_auto_coder_keeps_write_tools_enabled_after_project_info(self):
         self.agent.engine = CaptureEngine()
         self.agent.config.coder_auto = True
@@ -315,7 +377,7 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
             "<tool>write_file: index.html :: <!doctype html>\n"
             "<html><body>企業サイト</body></html></tool>",
             "<tool>review_changes</tool>",
-            "<tool>run_command: echo verified</tool>",
+            "<tool>run_command: python -m compileall .</tool>",
             "index.html を作成しました。",
         ])
 
@@ -460,7 +522,7 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
             "ファイルを保存します。\n"
             "<tool>write_file: index.html :: <!doctype html><title>企業</title></tool>",
             "<tool>review_changes</tool>",
-            "<tool>run_command: echo verified</tool>",
+            "<tool>run_command: python -m compileall .</tool>",
             "index.html を保存しました。",
         ])
         self.agent._generate = lambda _scratch, **_kwargs: next(outputs)
@@ -503,6 +565,95 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
         run.assert_called_once()
         self.assertIsNone(self.coder_tools.interact)
 
+    def test_local_server_command_is_recognized_without_blocking_shell_commands(self):
+        from rula.tools.coder import _local_http_port
+
+        self.assertEqual(_local_http_port("python3 -m http.server 8000"), 8000)
+        self.assertEqual(_local_http_port("python -m http.server"), 8000)
+        self.assertEqual(_local_http_port("uvicorn app:app --port 8123"), 8123)
+        self.assertEqual(_local_http_port("flask run"), 5000)
+        self.assertIsNone(_local_http_port("python -m pytest"))
+        self.assertIsNone(_local_http_port("echo python -m http.server 8000"))
+        self.assertIsNone(_local_http_port("python -m http.server 8000 && echo done"))
+        self.assertIsNone(_local_http_port("python -m http.server 70000"))
+
+    def test_node_dev_server_port_is_inferred_from_project_script(self):
+        from rula.tools.coder import _local_http_port
+
+        Path(self.temp_dir.name, "package.json").write_text(
+            '{"scripts":{"dev":"vite --host 127.0.0.1",'
+            '"preview":"vite preview"}}',
+            encoding="utf-8",
+        )
+
+        self.assertEqual(
+            _local_http_port("npm run dev", Path(self.temp_dir.name)), 5173)
+        self.assertEqual(
+            _local_http_port("npm run preview", Path(self.temp_dir.name)), 4173)
+        self.assertEqual(
+            _local_http_port(
+                "npm run dev -- --port 8123", Path(self.temp_dir.name)), 8123)
+
+    def test_local_http_probe_detects_a_real_localhost_response(self):
+        from rula.tools.coder import _local_http_responds, _wait_for_local_http
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, _format, *_args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.addCleanup(server.server_close)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.shutdown)
+
+        self.assertTrue(_local_http_responds(server.server_address[1]))
+        process = type("Process", (), {"poll": lambda _self: None})()
+        self.assertTrue(_wait_for_local_http(
+            process, server.server_address[1], timeout=1))
+        self.assertFalse(_local_http_responds(0))
+
+    def test_approved_local_server_returns_after_localhost_is_ready(self):
+        self.coder_tools.auto_approved = True
+        process = type("Process", (), {"pid": 4321, "poll": lambda _self: None})()
+        with patch("rula.tools.coder.subprocess.Popen", return_value=process) as popen, \
+                patch("rula.tools.coder._local_http_responds", return_value=False), \
+                patch("rula.tools.coder._wait_for_local_http", return_value=True), \
+                patch("rula.tools.coder.subprocess.run") as run:
+            result = self.coder_tools.run_command("python3 -m http.server 8000")
+
+        self.assertIn("サーバー起動完了: http://127.0.0.1:8000/", result)
+        self.assertIn("プロセスID: 4321", result)
+        popen.assert_called_once()
+        run.assert_not_called()
+
+    def test_existing_local_server_is_reported_without_duplicate_launch(self):
+        self.coder_tools.auto_approved = True
+        with patch("rula.tools.coder._local_http_responds", return_value=True), \
+                patch("rula.tools.coder.subprocess.Popen") as popen:
+            result = self.coder_tools.run_command("python3 -m http.server 8000")
+
+        self.assertIn("既存のローカルサーバー応答を確認", result)
+        self.assertIn("127.0.0.1:8000", result)
+        popen.assert_not_called()
+
+    def test_local_server_startup_failure_is_reported_and_process_is_stopped(self):
+        self.coder_tools.auto_approved = True
+        process = type("Process", (), {"pid": 4322, "poll": lambda _self: None})()
+        with patch("rula.tools.coder.subprocess.Popen", return_value=process), \
+                patch("rula.tools.coder._local_http_responds", return_value=False), \
+                patch("rula.tools.coder._wait_for_local_http", return_value=False), \
+                patch("rula.tools.coder._stop_process_tree", return_value=True) as stop:
+            result = self.coder_tools.run_command("python3 -m http.server 8001")
+
+        self.assertIn("サーバー起動失敗", result)
+        self.assertIn("localhost:8001", result)
+        stop.assert_called_once_with(process)
+
     def test_tool_result_callback_receives_completed_operation(self):
         completed = []
         self.agent.on_tool_result = lambda name, arg, result: completed.append(
@@ -514,6 +665,22 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
         self.assertEqual(completed[0][0:2], ("write_file", "sample.py :: print('ok')"))
         self.assertTrue(completed[0][2].startswith("保存しました:"))
 
+    def test_ready_local_server_satisfies_post_review_verification(self):
+        trace = Trace(tool_calls=[
+            ("write_file", "index.html :: <h1>Ready</h1>", "保存しました: index.html"),
+            ("review_changes", "", "--- a/index.html\n+++ b/index.html"),
+            ("run_command", "python3 -m http.server 8000",
+             "サーバー起動完了: http://127.0.0.1:8000/\nプロセスID: 4321"),
+        ])
+
+        self.assertIsNone(self.agent._coder_completion_stage(trace))
+
+        trace.tool_calls[-1] = (
+            "run_command", "python3 -m http.server 8000",
+            "既存のローカルサーバー応答を確認: http://127.0.0.1:8000/",
+        )
+        self.assertIsNone(self.agent._coder_completion_stage(trace))
+
     def test_auto_coding_request_retries_as_file_tool_after_prose(self):
         self.agent.config.coder_auto = True
         self.coder_tools.auto_approved = True
@@ -521,7 +688,7 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
             "こちらがHTMLです。\n<html><body>会社サイト</body></html>",
             "<tool>write_file: index.html :: <!doctype html>\n<html>done</html></tool>",
             "<tool>review_changes</tool>",
-            "<tool>run_command: echo verified</tool>",
+            "<tool>run_command: python -m compileall .</tool>",
             "index.html を作成しました。",
         ])
         progress = []
@@ -556,7 +723,7 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
             ("<tool>write_file: index.html :: <!doctype html>"
              "<title>Streamly</title><main>オリジナル動画サービス</main></tool>"),
             "<tool>review_changes</tool>",
-            "<tool>run_command: echo verified</tool>",
+            "<tool>run_command: python -m compileall .</tool>",
             "オリジナルの動画サービスサイトを作業フォルダに保存しました。",
         ])
         prompts = []
@@ -590,7 +757,7 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
             "以下のHTMLを使えます。\n<html><body>企業サイト</body></html>",
             "<tool>write_file: index.html :: <!doctype html>\n<html><body>会社</body></html></tool>",
             "<tool>review_changes</tool>",
-            "<tool>run_command: echo verified</tool>",
+            "<tool>run_command: python -m compileall .</tool>",
             "index.html を保存しました。",
         ])
         prompts = []
@@ -614,7 +781,7 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
                          ["project_info", "write_file", "review_changes", "run_command"])
         self.assertEqual(answer, "index.html を保存しました。")
         self.assertTrue(any(
-            "index.html に完成したページ" in message["content"]
+            "既存プロジェクトではファイル構成と既存コードを基準に" in message["content"]
             for messages in prompts for message in messages
         ))
         self.assertTrue(any("実装を再試行" in message for message in progress))

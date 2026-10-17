@@ -14,6 +14,7 @@
   const escapeHtml = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
   const state = { chatId: null, busy: false, image: null, thumb: null, think: false, info: null,
+                  appMode: "general",
                   workspace: localStorage.getItem("rula-workspace") || "", interaction: null,
                   autoConfirmedWorkspaces: new Set() };
 
@@ -37,11 +38,38 @@
     try {
       const info = await (await api("/api/info")).json();
       state.info = info;
+      state.appMode = info.app_mode === "coder" ? "coder" : "general";
+      configureAppMode();
+      if (info.switching) {
+        window.close();
+        return;
+      }
       showInfo(info);
       setTimeout(pollInfo, info.status === "ready" ? 30000 : 1000);
     } catch (e) {
       setTimeout(pollInfo, 2000);
     }
+  }
+
+  function configureAppMode() {
+    const coder = state.appMode === "coder";
+    const profile = $("profile");
+    for (const option of profile.options) {
+      option.hidden = coder ? option.value !== "coder" : option.value === "coder";
+    }
+    profile.disabled = coder;
+    if (coder) {
+      profile.value = "coder";
+      document.title = "RulaCoder";
+      document.querySelector(".logo").textContent = "RulaCoder";
+      document.querySelector("#empty p").textContent =
+        "作業フォルダを選択し、既存の構成に合わせてコードの作成・編集・検証を行います。";
+      document.querySelectorAll(".chip").forEach((chip) => chip.hidden = true);
+    } else {
+      document.title = "Rula";
+      document.querySelectorAll(".chip").forEach((chip) => chip.hidden = false);
+    }
+    updateProfile();
   }
 
   function showInfo(info) {
@@ -55,7 +83,9 @@
       $("hint").textContent = "モデルを読み込んでいます (10秒ほど)";
     } else if (info.status === "error") {
       $("model-name").textContent = "読み込みに失敗しました";
-      $("hint").textContent = "起動に失敗: " + (info.error || "") + "  (ログ: %APPDATA%\\Rula\\rula.log)";
+      const dataDir = state.appMode === "coder" ? "RulaCoder" : "Rula";
+      $("hint").textContent = "起動に失敗: " + (info.error || "")
+        + "  (ログ: %APPDATA%\\" + dataDir + "\\rula.log)";
     } else {
       $("model-name").textContent = info.model + (info.backend ? " · " + info.backend : "");
       if (!state.busy) $("hint").textContent = "";
@@ -166,7 +196,8 @@
     let chat;
     try { chat = await (await api("/api/chats/" + id)).json(); } catch (_) { return; }
     state.chatId = id;
-    $("profile").value = chat.profile || (chat.coder_workspace ? "coder" : "general");
+    $("profile").value = state.appMode === "coder" ? "coder"
+      : chat.profile === "coder" ? "general" : chat.profile || "general";
     $("coder-mode").value = chat.coder_mode || "chat";
     $("coder-effort").value = chat.coder_effort || "medium";
     if (chat.coder_workspace) {
@@ -668,7 +699,12 @@
   });
 
   // The backend exits when these stop: closing the window is how the app quits.
-  const ping = () => post("/api/ping").catch(() => {});
+  const ping = async () => {
+    try {
+      const result = await (await post("/api/ping")).json();
+      if (result.switching) window.close();
+    } catch (_) { /* the backend may be closing */ }
+  };
   ping();
   setInterval(ping, 10000);
   // A minimized or background window has this timer throttled by the browser to

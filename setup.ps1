@@ -4,7 +4,7 @@
 #
 # Downloads Rula into %LOCALAPPDATA%\Programs\Rula (or $env:RULA_HOME if set),
 # then runs install.ps1 there: it prepares Rula's own Python, llama.cpp and the
-# model, and puts Rula.exe on the desktop. Running this again updates Rula's
+# model, and puts Rula.exe and RulaCoder.exe on the desktop. Running this again updates Rula's
 # code and keeps everything already downloaded (the model, Python, llama.cpp).
 #
 # Plain ASCII, no BOM: run through Invoke-Expression, a BOM breaks the first
