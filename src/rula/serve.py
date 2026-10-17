@@ -1,4 +1,4 @@
-"""Keep the model warm so the app launches instantly.
+r"""Keep the model warm so the app launches instantly.
 
     python -m src.rula.serve        (or: .\warm.ps1)
 

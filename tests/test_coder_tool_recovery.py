@@ -99,6 +99,26 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
 
         self.assertTrue(self.agent._has_file_write(trace))
 
+    def test_noop_file_tool_does_not_allow_source_as_auto_mode_answer(self):
+        self.agent.config.coder_auto = True
+        self.agent.config.max_tool_calls = 1
+        self.agent._turn_text = "3DのWebサイトを作って"
+        outputs = iter([
+            "<tool>write_file: index.html :: <html></html></tool>",
+            "<html><body>generated source</body></html>",
+        ])
+        self.agent._generate = lambda _scratch, **_kwargs: next(outputs)
+        trace = Trace()
+        self.agent._use_tool = lambda name, arguments, _scratch, trace: trace.tool_calls.append(
+            (name, arguments, "変更なし: 指定内容はすでに保存されています。")
+        )
+
+        answer = self.agent._answer_or_tool([], trace)
+
+        self.assertIn("ファイル変更を完了できませんでした", answer)
+        self.assertNotIn("generated source", answer)
+        self.assertFalse(self.agent._has_file_write(trace))
+
     def test_tool_budget_never_returns_unexecuted_tool_markup(self):
         self.agent.config.max_tool_calls = 1
         outputs = iter([

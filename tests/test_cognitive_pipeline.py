@@ -2,6 +2,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 source_root = Path(os.environ.get(
     "RULA_TEST_SOURCE", str(Path(__file__).resolve().parents[1] / "src")
@@ -11,6 +12,7 @@ sys.path.insert(0, str(source_root))
 from rula.persona import build_system_prompt
 from rula.planner import needs_structured_reasoning
 from rula.agent import Agent, AgentConfig
+from rula import cli
 
 
 class ThinkingCaptureEngine:
@@ -27,6 +29,16 @@ class ThinkingCaptureEngine:
 
 
 class CognitivePipelinePromptTests(unittest.TestCase):
+    def test_cli_image_generation_is_opt_in_and_missing_build_fails_clearly(self):
+        self.assertFalse(AgentConfig().use_imagegen)
+
+        with patch.object(sys, "argv", ["rula", "--imagegen"]):
+            with patch.object(cli, "find_spec", return_value=None):
+                with self.assertRaises(SystemExit) as error:
+                    cli.main()
+
+        self.assertEqual(error.exception.code, 2)
+
     def test_default_prompt_includes_intent_evidence_and_final_consistency_checks(self):
         prompt = build_system_prompt()
 

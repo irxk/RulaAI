@@ -1,5 +1,6 @@
 """Rula の対話CLI。"""
 import argparse
+from importlib.util import find_spec
 import sys
 
 from .agent import Agent, AgentConfig
@@ -95,7 +96,12 @@ def main():
     p.add_argument("--candid", action="store_true", help="率直モード(無検閲)を有効にして起動")
     p.add_argument("--no-tools", action="store_true", help="ツールを無効にして起動")
     p.add_argument("--no-vision", action="store_true", help="画像の自動読み取りを無効にする")
-    p.add_argument("--no-imagegen", action="store_true", help="画像生成を無効にする")
+    imagegen = p.add_mutually_exclusive_group()
+    imagegen.add_argument("--imagegen", dest="use_imagegen", action="store_true",
+                          help="画像生成を有効にする(対応ビルドのみ)")
+    imagegen.add_argument("--no-imagegen", dest="use_imagegen", action="store_false",
+                          help="画像生成を無効にする")
+    p.set_defaults(use_imagegen=False)
     p.add_argument("--stream", action="store_true",
                    help="長い回答を生成しながら表示する")
     p.add_argument("--no-image-filter", action="store_true",
@@ -114,6 +120,8 @@ def main():
     p.add_argument("--no-memory", action="store_true", help="記憶を保存しない")
     p.add_argument("--device", default=None)
     args = p.parse_args()
+    if args.use_imagegen and find_spec("rula.imagegen") is None:
+        p.error("このビルドには画像生成機能が含まれていません。")
 
     print(f"{DIM}モデルを読み込んでいます…{RESET}")
     # The same choice the API makes: llama-server, then Ollama, then transformers.
@@ -132,7 +140,7 @@ def main():
         engine,
         AgentConfig(thinking=args.think, candid=args.candid,
                     use_tools=not args.no_tools, use_vision=not args.no_vision,
-                    use_imagegen=not args.no_imagegen,
+                    use_imagegen=args.use_imagegen,
                     image_filter=not args.no_image_filter, stream=args.stream,
                     max_new_tokens=args.max_new_tokens, temperature=args.temperature),
         default_registry(),
@@ -185,7 +193,7 @@ def main():
                     print(f"{YELLOW}使い方: /draw 夕焼けの海{RESET}")
                     continue
                 print(f"{DIM}画像を生成しています…{RESET}")
-                path, message, prompt = agent.draw(rest)
+                _, message, prompt = agent.draw(rest)
                 if show_trace:
                     print(f"{DIM}  [draw] prompt: {prompt}{RESET}")
                 print(f"{YELLOW}{message}{RESET}")
