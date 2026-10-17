@@ -1,18 +1,19 @@
 ﻿# Rula のアプリをビルドします(1秒前後)。
 #
-#   .\build.ps1               Rula.exe と Rula.lnk を作る
-#   .\build.ps1 -Shortcut     さらにデスクトップとスタートメニューに「Rula」(ショートカット) を置く
-#   .\build.ps1 -DesktopExe   デスクトップに Rula.exe を置き、スタートメニューにショートカットを置く
-#   .\build.ps1 -NoExe        Rula.exe を作らない(Rula.lnk だけ)
+#   .\build.ps1               Rula.exe / RulaCoder.exe とショートカットを作る
+#   .\build.ps1 -Shortcut     デスクトップとスタートメニューにも両方のショートカットを置く
+#   .\build.ps1 -DesktopExe   デスクトップに両方の exe、スタートメニューに両方のショートカットを置く
+#   .\build.ps1 -NoExe        exe を作らず、Python 起動用ショートカットだけ作る
 #
-# どちらをダブルクリックしても同じアプリが開きます。
-#   Rula.exe — Windows 付属の C# コンパイラで作るランチャー。追加のインストール不要。
+#   Rula.exe — 統合アシスタント
+#   RulaCoder.exe — Coder 専用アプリ
+# exe は Windows 付属の C# コンパイラで作るランチャー。追加のインストール不要。
 #              このフォルダの場所を中に書き込むので、デスクトップに置いても動きます。
 #              ただし署名の無い作りたての exe なので、ウイルス対策ソフトが誤検知して
 #              隔離することがあります(開発者の PC では Malwarebytes / Tencent PC Manager
 #              が実行した瞬間に消しました)。
-#   Rula.lnk — Python 本体(署名付きの pythonw.exe)を Rula のアイコンで起動する
-#              ショートカット。exe を使わないので誤検知されません。
+#   Rula.lnk / RulaCoder.lnk — 対応する exe を呼び出すショートカット。
+#              -NoExe 指定時は署名付きの pythonw.exe から直接起動します。
 param([switch]$Shortcut, [switch]$DesktopExe, [switch]$NoExe)
 $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
@@ -42,39 +43,55 @@ if (-not $NoExe) {
         /win32icon:launcher\rula.ico /r:System.Windows.Forms.dll `
         launcher\RulaLauncher.cs launcher\InstallDir.g.cs
     if ($LASTEXITCODE -ne 0) { throw "Rula.exe のビルドに失敗しました" }
+    & $csc /nologo /target:winexe /optimize+ /codepage:65001 /define:CODER_APP `
+        /out:RulaCoder.exe /win32icon:launcher\rula.ico /r:System.Windows.Forms.dll `
+        launcher\RulaLauncher.cs launcher\InstallDir.g.cs
+    if ($LASTEXITCODE -ne 0) { throw "RulaCoder.exe のビルドに失敗しました" }
 }
 
 $pythonw = if (Test-Path "$embeddedDir\pythonw.exe") { "$embeddedDir\pythonw.exe" }
            else { (Get-Command pythonw -ErrorAction SilentlyContinue).Source }
 if (-not $pythonw) { throw "pythonw.exe が見つかりません (install.ps1 を実行するか、Python 3 をインストールしてください)" }
-function New-RulaShortcut([string]$path) {
+function New-RulaShortcut([string]$path, [string]$name, [string]$appMode) {
     $s = (New-Object -ComObject WScript.Shell).CreateShortcut($path)
-    $s.TargetPath = $pythonw
-    $s.Arguments = "-m src.rula.gui"
+    $exe = Join-Path $PSScriptRoot ($name + ".exe")
+    if (-not $NoExe -and (Test-Path $exe)) {
+        $s.TargetPath = $exe
+        $s.Arguments = ""
+    } else {
+        $s.TargetPath = $pythonw
+        $s.Arguments = "-m src.rula.gui --app-mode $appMode"
+    }
     $s.WorkingDirectory = $PSScriptRoot
     $s.IconLocation = "$icon,0"
-    $s.Description = "Rula — 日本語AIアシスタント"
+    $s.Description = if ($appMode -eq "coder") { "RulaCoder — 自律型コーディングAI" } else { "Rula — 日本語AIアシスタント" }
     $s.Save()
 }
-New-RulaShortcut (Join-Path $PSScriptRoot "Rula.lnk")
+New-RulaShortcut (Join-Path $PSScriptRoot "Rula.lnk") "Rula" "general"
+New-RulaShortcut (Join-Path $PSScriptRoot "RulaCoder.lnk") "RulaCoder" "coder"
 
-$made = if ($NoExe) { "Rula.lnk" } else { "Rula.exe と Rula.lnk" }
+$made = if ($NoExe) { "Rula.lnk と RulaCoder.lnk" } else { "Rula.exe / RulaCoder.exe と両方のショートカット" }
 Write-Host ("{0} を作りました ({1:N1} 秒)" -f $made, $sw.Elapsed.TotalSeconds) -ForegroundColor Green
 
 if ($DesktopExe -and -not $NoExe) {
     Copy-Item (Join-Path $PSScriptRoot "Rula.exe") (Join-Path $desktop "Rula.exe") -Force
+    Copy-Item (Join-Path $PSScriptRoot "RulaCoder.exe") (Join-Path $desktop "RulaCoder.exe") -Force
     # 以前の導入で置いた、このフォルダを指すデスクトップのショートカットは二重になるので外す。
     $old = Join-Path $desktop "Rula.lnk"
     if (Test-Path $old) {
         $target = (New-Object -ComObject WScript.Shell).CreateShortcut($old).TargetPath
         if ($target -eq $pythonw) { Remove-Item $old }
     }
-    New-RulaShortcut (Join-Path $programs "Rula.lnk")
-    Write-Host "デスクトップに Rula.exe、スタートメニューに「Rula」を置きました" -ForegroundColor Green
+    New-RulaShortcut (Join-Path $programs "Rula.lnk") "Rula" "general"
+    New-RulaShortcut (Join-Path $programs "RulaCoder.lnk") "RulaCoder" "coder"
+    Write-Host "デスクトップに Rula.exe / RulaCoder.exe、スタートメニューに両方のショートカットを置きました" -ForegroundColor Green
 } elseif ($Shortcut) {
-    foreach ($dir in $desktop, $programs) { New-RulaShortcut (Join-Path $dir "Rula.lnk") }
-    Write-Host "デスクトップとスタートメニューに「Rula」を置きました" -ForegroundColor Green
+    foreach ($dir in $desktop, $programs) {
+        New-RulaShortcut (Join-Path $dir "Rula.lnk") "Rula" "general"
+        New-RulaShortcut (Join-Path $dir "RulaCoder.lnk") "RulaCoder" "coder"
+    }
+    Write-Host "デスクトップとスタートメニューに「Rula」「RulaCoder」を置きました" -ForegroundColor Green
 }
 if (-not $DesktopExe) {
-    Write-Host $(if ($NoExe) { "起動: Rula.lnk をダブルクリック" } else { "起動: Rula.lnk (または Rula.exe) をダブルクリック" })
+    Write-Host $(if ($NoExe) { "起動: Rula.lnk または RulaCoder.lnk をダブルクリック" } else { "起動: Rula.exe または RulaCoder.exe をダブルクリック" })
 }

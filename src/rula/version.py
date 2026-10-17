@@ -1,3 +1,3 @@
 """Rula application version."""
 
-__version__ = "1.10"
+__version__ = "1.12"

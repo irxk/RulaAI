@@ -22,6 +22,7 @@ from .quality import (StreamMonitor, check_arithmetic, chinese_leak, classify_qu
                       text_length, trim_to_length,
                       given_numbers, japanese_kanji, needs_japanese_rewrite,
                       needs_verification, reconcile_answer, score_answer)
+from .coder_workflow import CoderWorkflow
 from .tools import ToolRegistry, default_registry
 
 # The model claiming it cannot reach the internet, even though we just handed it
@@ -938,57 +939,16 @@ class Agent:
 
     @staticmethod
     def _is_coder_action_request(text: str) -> bool:
-        return bool(re.search(
-            r"(?:作って|作成して|作成する|実装して|実装する|修正して|修正する|"
-            r"直して|直す|編集して|編集する|変更して|変更する|追加して|追加する|"
-            r"生成して|生成する|構築して|開発して|"
-            r"パク(?:って|る|りたい)|真似(?:して|る|したい)|模倣(?:して|する)|"
-            r"コピー(?:して|する)|クローン(?:を作|して)|(?:そのまま)?再現して|"
-            r"\b(?:create|build|implement|fix|modify|edit|add|generate|develop)\b)",
-            text, re.I))
+        return CoderWorkflow.is_action_request(text)
 
     @staticmethod
     def _has_file_write(trace: Trace) -> bool:
-        return any(name in {"write_file", "edit_file", "apply_patch"}
-                   for name, _, _ in trace.tool_calls)
+        return CoderWorkflow.has_file_write(trace.tool_calls)
 
     @staticmethod
     def _coder_completion_stage(trace: Trace) -> str | None:
-        """Require an actual diff review and a post-review check after edits."""
-        mutations = {"write_file", "edit_file", "apply_patch"}
-        last_mutation = next(
-            (index for index in range(len(trace.tool_calls) - 1, -1, -1)
-             if trace.tool_calls[index][0] in mutations
-             and trace.tool_calls[index][2].startswith(("保存しました:", "変更しました:"))),
-            None,
-        )
-        if last_mutation is None:
-            return None
-        review = next(
-            (index for index in range(last_mutation + 1, len(trace.tool_calls))
-             if trace.tool_calls[index][0] == "review_changes"),
-            None,
-        )
-        if review is None:
-            return "review"
-        validation = next(
-            ((name, result) for name, _, result in reversed(trace.tool_calls[review + 1:])
-             if name in {"run_command", "check_python"}),
-            None,
-        )
-        if validation is None:
-            return "verify"
-        name, result = validation
-        if name == "run_command":
-            if (not re.search(r"(?m)^終了コード: 0\s*$", result)
-                    and not result.startswith((
-                        "サーバー起動完了: http://127.0.0.1:",
-                        "既存のローカルサーバー応答を確認: http://127.0.0.1:",
-                    ))):
-                return "verify"
-        elif not result.startswith("Python構文OK:"):
-            return "verify"
-        return None
+        """Require a diff review and successful, relevant post-review evidence."""
+        return CoderWorkflow.completion_stage(trace.tool_calls)
 
     def _think_then_answer(self, scratch: list[dict],
                            trace: Trace) -> tuple[str | None, str]:

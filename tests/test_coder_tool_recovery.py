@@ -264,7 +264,7 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
             "ファイルを作成しました。",
             "<tool>review_changes</tool>",
             "差分を確認しました。",
-            "<tool>run_command: echo verified</tool>",
+            "<tool>run_command: python -m compileall .</tool>",
             "変更を確認し、検証コマンドも成功しました。",
         ])
 
@@ -316,6 +316,43 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
 
         self.assertIsNone(self.agent._coder_completion_stage(trace))
 
+    def test_arbitrary_successful_command_does_not_unlock_completion(self):
+        trace = Trace(tool_calls=[
+            ("write_file", "app.py :: print('ready')", "保存しました: app.py"),
+            ("review_changes", "", "--- a/app.py\n+++ b/app.py"),
+            ("run_command", "echo verified", "終了コード: 0\nverified"),
+        ])
+
+        self.assertEqual(self.agent._coder_completion_stage(trace), "verify")
+
+    def test_test_build_and_static_check_commands_unlock_completion(self):
+        for command in (
+            "pytest -q",
+            "python -m unittest discover -s tests",
+            "npm run build",
+            "cargo test",
+            r"C:\Python\python.exe -m compileall .",
+            "uv run pytest",
+        ):
+            with self.subTest(command=command):
+                trace = Trace(tool_calls=[
+                    ("write_file", "app.py :: print('ready')", "保存しました: app.py"),
+                    ("review_changes", "", "--- a/app.py\n+++ b/app.py"),
+                    ("run_command", command, "終了コード: 0\nOK"),
+                ])
+                self.assertIsNone(self.agent._coder_completion_stage(trace))
+
+    def test_latest_relevant_validation_result_controls_completion(self):
+        trace = Trace(tool_calls=[
+            ("write_file", "app.py :: print('ready')", "保存しました: app.py"),
+            ("review_changes", "", "--- a/app.py\n+++ b/app.py"),
+            ("run_command", "pytest -q", "終了コード: 0\nOK"),
+            ("run_command", "pytest -q", "終了コード: 1\nFAILED"),
+            ("run_command", "echo done", "終了コード: 0\ndone"),
+        ])
+
+        self.assertEqual(self.agent._coder_completion_stage(trace), "verify")
+
     def test_auto_coder_keeps_write_tools_enabled_after_project_info(self):
         self.agent.engine = CaptureEngine()
         self.agent.config.coder_auto = True
@@ -340,7 +377,7 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
             "<tool>write_file: index.html :: <!doctype html>\n"
             "<html><body>企業サイト</body></html></tool>",
             "<tool>review_changes</tool>",
-            "<tool>run_command: echo verified</tool>",
+            "<tool>run_command: python -m compileall .</tool>",
             "index.html を作成しました。",
         ])
 
@@ -485,7 +522,7 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
             "ファイルを保存します。\n"
             "<tool>write_file: index.html :: <!doctype html><title>企業</title></tool>",
             "<tool>review_changes</tool>",
-            "<tool>run_command: echo verified</tool>",
+            "<tool>run_command: python -m compileall .</tool>",
             "index.html を保存しました。",
         ])
         self.agent._generate = lambda _scratch, **_kwargs: next(outputs)
@@ -651,7 +688,7 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
             "こちらがHTMLです。\n<html><body>会社サイト</body></html>",
             "<tool>write_file: index.html :: <!doctype html>\n<html>done</html></tool>",
             "<tool>review_changes</tool>",
-            "<tool>run_command: echo verified</tool>",
+            "<tool>run_command: python -m compileall .</tool>",
             "index.html を作成しました。",
         ])
         progress = []
@@ -686,7 +723,7 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
             ("<tool>write_file: index.html :: <!doctype html>"
              "<title>Streamly</title><main>オリジナル動画サービス</main></tool>"),
             "<tool>review_changes</tool>",
-            "<tool>run_command: echo verified</tool>",
+            "<tool>run_command: python -m compileall .</tool>",
             "オリジナルの動画サービスサイトを作業フォルダに保存しました。",
         ])
         prompts = []
@@ -720,7 +757,7 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
             "以下のHTMLを使えます。\n<html><body>企業サイト</body></html>",
             "<tool>write_file: index.html :: <!doctype html>\n<html><body>会社</body></html></tool>",
             "<tool>review_changes</tool>",
-            "<tool>run_command: echo verified</tool>",
+            "<tool>run_command: python -m compileall .</tool>",
             "index.html を保存しました。",
         ])
         prompts = []

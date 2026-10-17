@@ -154,11 +154,12 @@ if ($haveServer -and $haveModel) {
     # -- 3. 起動用のショートカット --------------------------------------------
     Say "[3/3] 起動用のファイルを作っています" Cyan
     $build = Join-Path $PSScriptRoot "build.ps1"
-    if ($NoShortcut) { & $build -NoExe }
+    if ($NoShortcut) { & $build }
     elseif ($DesktopExe) { & $build -DesktopExe }
-    else { & $build -NoExe -Shortcut }
+    else { & $build -Shortcut }
     $desktop = [Environment]::GetFolderPath("Desktop")
     $launcher = if ($DesktopExe -and -not $NoShortcut) { Join-Path $desktop "Rula.exe" }
+                elseif ($NoShortcut) { Join-Path $PSScriptRoot "Rula.exe" }
                 else { Join-Path $PSScriptRoot "Rula.lnk" }
 
     Say ""
@@ -195,6 +196,8 @@ if ($haveServer -and $haveModel) {
             if (-not $ok) {
                 if ($started -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
                 Remove-Item $launcher -ErrorAction SilentlyContinue
+                Remove-Item (Join-Path $PSScriptRoot "RulaCoder.exe") -ErrorAction SilentlyContinue
+                Remove-Item (Join-Path $desktop "RulaCoder.exe") -ErrorAction SilentlyContinue
                 & $build -NoExe -Shortcut | Out-Null
                 Say ""
                 Say "デスクトップの Rula.exe がウイルス対策ソフトに止められました (署名の無い exe への誤検知です)。" Yellow
