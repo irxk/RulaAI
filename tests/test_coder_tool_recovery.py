@@ -145,6 +145,32 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
 
         self.assertTrue(self.agent._has_file_write(trace))
 
+    def test_coder_image_description_reaches_the_model_context(self):
+        image_ref = "data:image/jpeg;base64,dGVzdA=="
+        description = "画面にはcreateEnemy関数の未完成なコードが表示されています。"
+        captured = {}
+        self.agent.engine = CaptureEngine()
+        self.agent.config.use_vision = True
+        def read_image(ref, _question=None):
+            captured["image_ref"] = ref
+            return description
+
+        self.agent.look = read_image
+
+        def answer_from_context(scratch, _trace):
+            captured["system"] = self.agent._system_prompt()
+            return "画面の内容を確認しました。"
+
+        self.agent._answer_or_tool = answer_from_context
+
+        answer, trace = self.agent.ask(
+            "この画面の問題を確認してください。", image_ref=image_ref)
+
+        self.assertEqual(answer, "画面の内容を確認しました。")
+        self.assertEqual(trace.image, (image_ref, description))
+        self.assertEqual(captured["image_ref"], image_ref)
+        self.assertIn(description, captured["system"])
+
     def test_noop_file_tool_does_not_allow_source_as_auto_mode_answer(self):
         self.agent.config.coder_auto = True
         self.agent.config.max_tool_calls = 1

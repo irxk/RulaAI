@@ -193,6 +193,22 @@ class GuiVersionTests(unittest.TestCase):
         self.assertIn("RulaCoder.exe", build)
         self.assertIn("/define:CODER_APP", build)
 
+    def test_coder_profile_allows_images_when_the_model_supports_vision(self):
+        static = source_root / "rula" / "gui" / "static"
+        app_js = (static / "app.js").read_text(encoding="utf-8")
+        server_source = (source_root / "rula" / "gui" / "server.py").read_text(
+            encoding="utf-8")
+
+        self.assertIn(
+            '$("attach").disabled = !(state.info && state.info.status === "ready" && state.info.vision);',
+            app_js,
+        )
+        self.assertNotIn("Coderでは画像添付できません", app_js)
+        self.assertNotIn('raise HTTPException(400, "Coderモードでは画像を使えません。")',
+                         server_source)
+        self.assertIn("answer, trace = agent.ask(question, image_ref=req.image)",
+                      server_source)
+
     def test_version_badge_is_fixed_to_the_visible_window_corner(self):
         css = (source_root / "rula" / "gui" / "static" / "app.css").read_text(
             encoding="utf-8")
