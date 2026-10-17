@@ -185,7 +185,11 @@ class CoderWorkflow:
 
     @staticmethod
     def has_file_write(tool_calls: Iterable[tuple[str, str, str]]) -> bool:
-        return any(name in _MUTATIONS for name, _, _ in tool_calls)
+        return any(
+            name in _MUTATIONS and result.startswith(
+                ("保存しました:", "変更しました:", "変更なし:"))
+            for name, _, result in tool_calls
+        )
 
     @staticmethod
     def completion_stage(tool_calls: list[tuple[str, str, str]]) -> str | None:

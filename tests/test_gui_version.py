@@ -21,6 +21,16 @@ from rula.version import __version__
 
 
 class GuiVersionTests(unittest.TestCase):
+    def test_failed_write_activity_is_not_marked_complete(self):
+        self.assertFalse(server._coder_tool_succeeded(
+            "write_file", "形式エラー: 相対パス :: ファイル全文"))
+        self.assertTrue(server._coder_tool_succeeded(
+            "write_file", "保存しました: index.html"))
+        self.assertEqual(
+            server._coder_activity_result("write_file", "形式エラー: 引数を確認してください。"),
+            "形式エラー: 引数を確認してください。",
+        )
+
     def test_local_server_activity_shows_readiness_instead_of_generic_running(self):
         result = server._coder_activity_result(
             "run_command",

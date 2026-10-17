@@ -192,6 +192,30 @@ def _coder_activity_result(name: str, result: str) -> str:
     return re.sub(r"\s+", " ", result).strip()[:240]
 
 
+def _coder_tool_succeeded(name: str, result: str) -> bool:
+    if name in ("write_file", "edit_file"):
+        return result.startswith(("保存しました:", "変更なし:"))
+    if name == "apply_patch":
+        return result.startswith(("変更しました:", "変更なし:"))
+    if name == "run_command":
+        if result.startswith((
+                "サーバー起動完了: ", "既存のローカルサーバー応答を確認: ")):
+            return True
+        match = re.match(r"終了コード: (-?\d+)(?:\s|$)", result)
+        return bool(match and match.group(1) == "0")
+    if result.startswith((
+            "ツール呼び出し形式エラー:", "形式エラー:", "ファイルが見つかりません",
+            "ファイルを読めません", "フォルダが見つかりません",
+            "ファイルではなくフォルダです:", "ファイルが大きすぎる",
+            "置換を中止しました:", "適用を中止しました",
+            "Python構文エラー:", "Gitを実行できません",
+            "Gitが見つかりません", "Gitの読み取り処理",
+            "調査上限:", "開始行がファイルの範囲外です",
+    )):
+        return False
+    return True
+
+
 # -- access control ---------------------------------------------------------
 def _check(request: Request):
     host = (request.headers.get("host") or "").lower()
@@ -587,7 +611,8 @@ async def chat(req: ChatIn, request: Request):
                         if (entry.get("name") == name
                                 and entry.get("detail") == _coder_activity_detail(name, argument)
                                 and entry.get("phase") == "running"):
-                            entry["phase"] = "done"
+                            entry["phase"] = (
+                                "done" if _coder_tool_succeeded(name, result) else "error")
                             entry["result"] = _coder_activity_result(name, result)
                             emit("activity", entry=dict(entry))
                             break

@@ -69,6 +69,36 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
         self.assertIn("引数が必要", prompts[4][-1]["content"])
         self.assertNotIn("<tool>", answer)
 
+    def test_auto_mode_never_returns_source_after_failed_file_tool(self):
+        self.agent.config.coder_auto = True
+        self.agent.config.max_tool_calls = 1
+        self.agent._turn_text = "index.htmlでサイトを作って"
+        outputs = iter([
+            "<tool>write_file: index.html</tool>",
+            "<!doctype html><html><body>source only</body></html>",
+        ])
+        self.agent._generate = lambda _scratch, **_kwargs: next(outputs)
+
+        answer = self.agent._answer_or_tool([], Trace())
+
+        self.assertIn("コードを回答に貼るだけで完了とは扱いませんでした", answer)
+        self.assertNotIn("source only", answer)
+        self.assertFalse(Path(self.temp_dir.name, "index.html").exists())
+
+    def test_failed_mutation_does_not_count_as_a_file_write(self):
+        trace = Trace(tool_calls=[
+            ("write_file", "index.html", "形式エラー: 相対パス :: ファイル全文")
+        ])
+
+        self.assertFalse(self.agent._has_file_write(trace))
+
+    def test_successful_mutation_counts_as_a_file_write(self):
+        trace = Trace(tool_calls=[
+            ("write_file", "index.html :: <html></html>", "保存しました: index.html")
+        ])
+
+        self.assertTrue(self.agent._has_file_write(trace))
+
     def test_tool_budget_never_returns_unexecuted_tool_markup(self):
         self.agent.config.max_tool_calls = 1
         outputs = iter([

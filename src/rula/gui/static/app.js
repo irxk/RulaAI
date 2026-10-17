@@ -282,6 +282,7 @@
         row.append(el("span", "activity-progress", "実行中"));
       }
       row.classList.toggle("activity-complete", entry.phase === "done");
+      row.classList.toggle("activity-failed", entry.phase === "error");
       scrollToEnd();
     };
 
