@@ -54,6 +54,7 @@ _MAX_PROJECT_TREE_ENTRIES = 120
 _MAX_PROJECT_TREE_CHARS = 6000
 _MAX_AUTO_INSPECTIONS = 5
 _PLAN_STATUS_RANK = {"pending": 0, "in_progress": 1, "completed": 2}
+_TOOL_ARGUMENT_SEPARATOR = re.compile(r"[ \t]*(?:::|：：)[ \t]*")
 _HTTP_SERVER_COMMANDS = (
     (re.compile(
         r"^\s*(?:python(?:3(?:\.\d+)?)?|py(?:\s+-\d+(?:\.\d+)?)?)"
@@ -822,9 +823,10 @@ class CoderTools:
         return self.interact("question", message=question)
 
     def write_file(self, argument: str) -> str:
-        relative, separator, content = argument.partition(" :: ")
-        if not separator:
+        parts = _TOOL_ARGUMENT_SEPARATOR.split(argument, maxsplit=1)
+        if len(parts) != 2:
             return "形式エラー: 相対パス :: ファイル全文 の形式で指定してください。"
+        relative, content = parts
         try:
             content_size = len(content.encode("utf-8"))
         except UnicodeError as exc:
@@ -838,7 +840,7 @@ class CoderTools:
         return self._write_files([(path, content)])
 
     def edit_file(self, argument: str) -> str:
-        parts = argument.split(" :: ", 2)
+        parts = _TOOL_ARGUMENT_SEPARATOR.split(argument, maxsplit=2)
         if len(parts) != 3:
             return "形式エラー: 相対パス :: 置換前 :: 置換後 の形式で指定してください。"
         relative, old, new = parts

@@ -103,6 +103,30 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
         self.assertNotIn("source only", answer)
         self.assertFalse(Path(self.temp_dir.name, "index.html").exists())
 
+    def test_write_file_recovers_from_missing_argument_separator(self):
+        self.agent.config.max_tool_calls = 2
+        outputs = iter([
+            "<tool>write_file: index.html</tool>",
+            "<tool>write_file: index.html::<!doctype html></tool>",
+            "index.htmlを保存しました。",
+        ])
+        prompts = []
+
+        def generate(scratch, **_kwargs):
+            prompts.append([dict(message) for message in scratch])
+            return next(outputs)
+
+        self.agent._generate = generate
+
+        answer = self.agent._answer_or_tool([], Trace())
+
+        self.assertEqual(answer, "index.htmlを保存しました。")
+        self.assertEqual(
+            Path(self.temp_dir.name, "index.html").read_text(encoding="utf-8"),
+            "<!doctype html>",
+        )
+        self.assertIn("保存は実行されていません", prompts[1][-1]["content"])
+
     def test_auto_mode_retries_source_answer_as_a_file_tool_call(self):
         self.agent.config.coder_auto = True
         self.agent.config.max_tool_calls = 3
@@ -399,6 +423,34 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
 
         self.assertEqual(saved, "保存しました: index.html")
         self.assertTrue(Path(self.temp_dir.name, "index.html").is_file())
+
+    def test_file_tools_accept_compact_and_fullwidth_separators(self):
+        saved = self.coder_tools.write_file("index.html::<!doctype html>::ready")
+        self.assertEqual(saved, "保存しました: index.html")
+        self.assertEqual(
+            Path(self.temp_dir.name, "index.html").read_text(encoding="utf-8"),
+            "<!doctype html>::ready",
+        )
+
+        edited = self.coder_tools.edit_file(
+            "index.html ：： <!doctype html> ：： <html>ready</html>")
+        self.assertEqual(edited, "保存しました: index.html")
+        self.assertEqual(
+            Path(self.temp_dir.name, "index.html").read_text(encoding="utf-8"),
+            "<html>ready</html>::ready",
+        )
+
+    def test_malformed_file_tool_feedback_explains_correct_argument_shape(self):
+        write_feedback = self.agent._tool_result_prompt(
+            "形式エラー: 相対パス :: ファイル全文", "write_file")
+        edit_feedback = self.agent._tool_result_prompt(
+            "形式エラー: 相対パス :: 置換前 :: 置換後 の形式で指定してください。",
+            "edit_file")
+
+        self.assertIn("保存は実行されていません", write_feedback)
+        self.assertIn("read_file", write_feedback)
+        self.assertIn("3部分", edit_feedback)
+        self.assertIn("置換前の文字列", edit_feedback)
 
     def test_site_request_is_explicit_in_dedicated_coder_prompt(self):
         from rula.coder_workflow import CoderWorkflow
