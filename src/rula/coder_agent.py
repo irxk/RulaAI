@@ -25,4 +25,6 @@ class CoderAgent(Agent):
         self.config.temperature = 0.2
         self.config.stream = False
         self.config.preview = False
-        self.config.thinking = CoderWorkflow.thinking_enabled(effort, self.engine)
+        action_request = mode == "auto" and CoderWorkflow.is_action_request(request_text)
+        self.config.thinking = (
+            CoderWorkflow.thinking_enabled(effort, self.engine) and not action_request)
