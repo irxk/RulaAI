@@ -367,14 +367,23 @@ class Agent:
         return (f"［補足: ユーザーには見えていない参考情報。必要な時だけ使い、"
                 f"補足があること自体には触れない］\n{notes}") if notes else None
 
-    def _messages(self, extra: list[dict] | None = None) -> list[dict]:
+    def _messages(self, extra: list[dict] | None = None,
+                  history_skip: int = 0) -> list[dict]:
         msgs = [{"role": "system", "content": self._system_prompt()}]
         turns = self.history[-self.config.history_limit:]
+        if history_skip:
+            start = min(history_skip, len(turns) - 1)
+            while start < len(turns) - 1 and turns[start].role != "user":
+                start += 1
+            turns = turns[start:]
         note = self._turn_context()
         for i, turn in enumerate(turns):
             content = turn.content
             if note and i == len(turns) - 1 and turn.role == "user":
                 content = f"{content}\n\n{note}"
+            if history_skip and i == len(turns) - 1 and turn.role == "user":
+                content += ("\n\n［コンテキスト上限のため、以前の会話を一部省略しています。"
+                            "現在の依頼と会話の要約を優先してください。］")
             msgs.append({"role": turn.role, "content": content})
         return msgs + (extra or [])
 
@@ -676,7 +685,32 @@ class Agent:
                         abort_check=sm.feed if sm else None,
                         think_cap=self._think_cap or self.config.think_cap)
         start = time.perf_counter()
-        text = self.engine.generate(self._messages(scratch), cfg)
+        history_skip = 0
+        history = self.history[-self.config.history_limit:]
+        while True:
+            try:
+                text = self.engine.generate(
+                    self._messages(scratch, history_skip=history_skip), cfg)
+                break
+            except Exception as exc:
+                if not self._is_context_overflow(exc):
+                    raise
+                next_skip = history_skip + 1
+                while next_skip < len(history) - 1 \
+                        and history[next_skip].role != "user":
+                    next_skip += 1
+                if next_skip >= len(history):
+                    raise RuntimeError(
+                        "今回の依頼と必須指示だけでモデルのコンテキスト上限を超えています。"
+                        "新しいチャットで依頼を短くするか、長い資料を分割してください。"
+                    ) from exc
+                history_skip = next_skip
+                if self.on_progress is not None:
+                    try:
+                        self.on_progress(
+                            "会話履歴がコンテキスト上限を超えたため、古い履歴を省いて再試行しています。")
+                    except Exception:
+                        pass
         self._steps.append((sys._getframe(1).f_code.co_name,
                             round(time.perf_counter() - start, 2)))
         self._stream_abort = sm.abort_reason if sm else None
@@ -685,6 +719,15 @@ class Agent:
         if stop and "</tool>" in stop and "<tool>" in text and "</tool>" not in text:
             text += "</tool>"
         return text
+
+    @staticmethod
+    def _is_context_overflow(error: Exception) -> bool:
+        message = str(error).lower()
+        return any(marker in message for marker in (
+            "exceed_context_size_error",
+            "exceeds the available context size",
+            "prompt is too long",
+        ))
 
     def _finish_if_cut_off(self, answer: str, scratch: list[dict]) -> tuple[str, int]:
         """Keep writing when the answer stopped because the budget ran out.
