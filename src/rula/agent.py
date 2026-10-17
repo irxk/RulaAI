@@ -1,9 +1,11 @@
 """Rula's orchestration layer: conversation state, thinking mode, and the tool loop."""
 import json
+import math
 import os
 import re
 import sys
 import time
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -84,6 +86,13 @@ STRAY_TAG_RE = re.compile(
 
 
 _JAPANESE_RE = re.compile(r"[ぁ-んァ-ン一-龥]")
+_MEMORY_CHUNK_CHARS = 2000
+_MEMORY_RECALL_CHARS = 6000
+_MEMORY_RECALL_CHUNKS = 6
+_MEMORY_STOP_TERMS = {
+    "です", "ます", "した", "する", "こと", "これ", "それ", "ため", "から",
+    "ので", "では", "には", "ます", "です", "ある", "いる", "そして",
+}
 
 
 def _has_japanese(text: str) -> bool:
@@ -216,6 +225,9 @@ class Agent:
         self.memory = memory if memory is not None else Memory()
         self.embedding = embedding_memory  # EmbeddingMemory or None
         self.history: list[Turn] = []
+        self._archived_turns: list[Turn] = []
+        self._archive_chunks: list[tuple[int, int, int, frozenset[str]]] = []
+        self._archive_term_frequency: Counter[str] = Counter()
         self._vision = vision  # lazily built; the model only loads on first image
         self._painter = None  # lazily built; the model only loads on first drawing
         self._turn_note: str | None = None  # what the vision model saw, for one turn
@@ -289,17 +301,29 @@ class Agent:
     # -- conversation state -------------------------------------------------
     def reset(self):
         self.history.clear()
+        self._archived_turns.clear()
+        self._archive_chunks.clear()
+        self._archive_term_frequency.clear()
         # The summary is history too; left in place it would carry the old
         # conversation into the new one.
         self._summary = self._summary_text = None
 
     def save(self, path: str):
         with open(path, "w", encoding="utf-8") as f:
-            json.dump([t.__dict__ for t in self.history], f, ensure_ascii=False, indent=2)
+            turns = self._archived_turns + self.history
+            json.dump([t.__dict__ for t in turns], f, ensure_ascii=False, indent=2)
 
     def load(self, path: str):
         with open(path, encoding="utf-8") as f:
             self.history = [Turn(**d) for d in json.load(f)]
+        self._archived_turns.clear()
+        self._archive_chunks.clear()
+        self._archive_term_frequency.clear()
+        if self.config.history_limit and len(self.history) > self.config.history_limit:
+            old = self.history[:-self.config.history_limit]
+            self.history = self.history[-self.config.history_limit:]
+            self._archive_history(old)
+        self._summary = self._summary_text = None
 
     def _system_prompt(self) -> str:
         # Only what holds steady from turn to turn belongs here. The server reuses
@@ -368,7 +392,8 @@ class Agent:
                 f"補足があること自体には触れない］\n{notes}") if notes else None
 
     def _messages(self, extra: list[dict] | None = None,
-                  history_skip: int = 0) -> list[dict]:
+                  history_skip: int = 0,
+                  archive_chars: int = _MEMORY_RECALL_CHARS) -> list[dict]:
         msgs = [{"role": "system", "content": self._system_prompt()}]
         turns = self.history[-self.config.history_limit:]
         if history_skip:
@@ -377,15 +402,92 @@ class Agent:
                 start += 1
             turns = turns[start:]
         note = self._turn_context()
+        archive = self._archive_context(archive_chars)
         for i, turn in enumerate(turns):
             content = turn.content
             if note and i == len(turns) - 1 and turn.role == "user":
                 content = f"{content}\n\n{note}"
+            if archive and i == len(turns) - 1 and turn.role == "user":
+                content += f"\n\n{archive}"
             if history_skip and i == len(turns) - 1 and turn.role == "user":
                 content += ("\n\n［コンテキスト上限のため、以前の会話を一部省略しています。"
                             "現在の依頼と会話の要約を優先してください。］")
             msgs.append({"role": turn.role, "content": content})
         return msgs + (extra or [])
+
+    @staticmethod
+    def _memory_terms(text: str) -> frozenset[str]:
+        terms: set[str] = set()
+        for token in re.findall(
+                r"[a-z0-9][a-z0-9_./:+-]*|[ぁ-んァ-ヶー一-龯]+",
+                text.casefold()):
+            if _JAPANESE_RE.search(token):
+                terms.update(
+                    token[index:index + 2]
+                    for index in range(len(token) - 1)
+                    if token[index:index + 2] not in _MEMORY_STOP_TERMS
+                )
+            elif len(token) > 1:
+                terms.add(token)
+        return frozenset(terms)
+
+    def _archive_history(self, turns: list[Turn]) -> None:
+        for turn in turns:
+            turn_index = len(self._archived_turns)
+            self._archived_turns.append(turn)
+            content = turn.content
+            for start in range(0, len(content), _MEMORY_CHUNK_CHARS):
+                end = min(start + _MEMORY_CHUNK_CHARS, len(content))
+                terms = self._memory_terms(content[start:end])
+                self._archive_chunks.append((turn_index, start, end, terms))
+                self._archive_term_frequency.update(terms)
+
+    def _archive_context(self, max_chars: int = _MEMORY_RECALL_CHARS) -> str:
+        if max_chars <= 0 or not self._archive_chunks:
+            return ""
+        query_terms = self._memory_terms(self._turn_text)
+        chunk_count = len(self._archive_chunks)
+        ranked: list[tuple[float, int]] = []
+        if query_terms:
+            for index, (_, _, _, terms) in enumerate(self._archive_chunks):
+                matches = query_terms & terms
+                if not matches:
+                    continue
+                score = sum(
+                    1 + math.log(
+                        (chunk_count + 1) /
+                        (self._archive_term_frequency[term] + 1))
+                    for term in matches
+                )
+                score = score / math.sqrt(len(terms) or 1)
+                score *= 1 + 0.15 * index / max(chunk_count - 1, 1)
+                ranked.append((score, index))
+        ranked.sort(reverse=True)
+
+        priority = [index for _, index in ranked[:_MEMORY_RECALL_CHUNKS]]
+        priority.extend(
+            index for index in range(chunk_count - 1, max(-1, chunk_count - 3), -1)
+            if index not in priority
+        )
+        excerpts: list[tuple[int, str]] = []
+        used_chars = 0
+        for index in priority:
+            turn_index, start, end, _ = self._archive_chunks[index]
+            turn = self._archived_turns[turn_index]
+            label = "ユーザー" if turn.role == "user" else "アシスタント"
+            excerpt = f"[{label}] {turn.content[start:end].strip()}"
+            if not excerpt.strip() or used_chars + len(excerpt) > max_chars:
+                continue
+            excerpts.append((index, excerpt))
+            used_chars += len(excerpt)
+        if not excerpts:
+            return ""
+        excerpts.sort(key=lambda item: item[0])
+        return (
+            "［長期会話記憶から今回に関連する過去発言を抜粋。完全な履歴ではなく、"
+            "今回の指示を優先する］\n" +
+            "\n---\n".join(excerpt for _, excerpt in excerpts)
+        )
 
     # -- turn execution -----------------------------------------------------
     def ask(self, user_input: str, image_ref: str | None = None) -> tuple[str, Trace]:
@@ -686,29 +788,40 @@ class Agent:
                         think_cap=self._think_cap or self.config.think_cap)
         start = time.perf_counter()
         history_skip = 0
+        archive_chars = _MEMORY_RECALL_CHARS
         history = self.history[-self.config.history_limit:]
         while True:
             try:
                 text = self.engine.generate(
-                    self._messages(scratch, history_skip=history_skip), cfg)
+                    self._messages(
+                        scratch,
+                        history_skip=history_skip,
+                        archive_chars=archive_chars,
+                    ),
+                    cfg,
+                )
                 break
             except Exception as exc:
                 if not self._is_context_overflow(exc):
                     raise
-                next_skip = history_skip + 1
-                while next_skip < len(history) - 1 \
-                        and history[next_skip].role != "user":
-                    next_skip += 1
-                if next_skip >= len(history):
+                if history_skip < len(history) - 1:
+                    next_skip = history_skip + 1
+                    while next_skip < len(history) - 1 \
+                            and history[next_skip].role != "user":
+                        next_skip += 1
+                    history_skip = next_skip
+                    progress = "会話履歴が長いため、古い履歴を省いて再試行しています。"
+                elif archive_chars and self._archive_chunks:
+                    archive_chars = 0 if archive_chars <= 1500 else archive_chars // 2
+                    progress = "参照する過去会話をさらに減らして再試行しています。"
+                else:
                     raise RuntimeError(
                         "今回の依頼と必須指示だけでモデルのコンテキスト上限を超えています。"
                         "新しいチャットで依頼を短くするか、長い資料を分割してください。"
                     ) from exc
-                history_skip = next_skip
                 if self.on_progress is not None:
                     try:
-                        self.on_progress(
-                            "会話履歴がコンテキスト上限を超えたため、古い履歴を省いて再試行しています。")
+                        self.on_progress(progress)
                     except Exception:
                         pass
         self._steps.append((sys._getframe(1).f_code.co_name,
@@ -1468,6 +1581,7 @@ class Agent:
         if not old:
             return
 
+        self._archive_history(old)
         parts = []
         for turn in old:
             text = turn.content.strip()

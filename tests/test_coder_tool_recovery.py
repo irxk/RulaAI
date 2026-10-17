@@ -220,6 +220,65 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
 
         self.assertEqual(len(self.agent.engine.calls), 1)
 
+    def test_compressed_history_archives_full_text_and_recalls_relevant_chunks(self):
+        self.agent.engine = CaptureEngine()
+        self.agent.config.compress_after = 4
+        self.agent.config.keep_recent = 2
+        long_old_message = ("古い設計メモです。\n" * 160) + (
+            "決定ID NOVA-742: データ保存形式はSQLiteを使用する。")
+        self.agent.history.extend([
+            Turn("user", long_old_message),
+            Turn("assistant", "NOVA-742ではSQLiteを採用します。"),
+            Turn("user", "最近の依頼です。"),
+            Turn("assistant", "最近の回答です。"),
+            Turn("user", "NOVA-742のデータ保存形式は何でしたか？"),
+        ])
+
+        self.agent._compress_history()
+        self.agent._turn_text = "NOVA-742のデータ保存形式は何でしたか？"
+        messages = self.agent._messages()
+        latest_user = next(
+            message for message in reversed(messages) if message["role"] == "user")
+
+        self.assertEqual(len(self.agent.history), 2)
+        self.assertEqual(len(self.agent._archived_turns), 3)
+        self.assertEqual(self.agent._archived_turns[0].content, long_old_message)
+        self.assertIn("決定ID NOVA-742", latest_user["content"])
+        self.assertIn("SQLite", latest_user["content"])
+        self.assertIn("最近の依頼です。", latest_user["content"])
+
+    def test_save_and_load_keeps_compressed_archive_verbatim(self):
+        self.agent.engine = CaptureEngine()
+        self.agent.config.compress_after = 4
+        self.agent.config.keep_recent = 2
+        original = "長期記憶に残す正確な仕様ID ARCHIVE-90210"
+        self.agent.history.extend([
+            Turn("user", original),
+            Turn("assistant", "仕様IDを記録しました。"),
+            Turn("user", "最近の質問"),
+            Turn("assistant", "最近の回答"),
+        ])
+        self.agent._compress_history()
+
+        path = Path(self.temp_dir.name, "conversation.json")
+        self.agent.save(str(path))
+        restored = Agent(
+            engine=CaptureEngine(),
+            config=AgentConfig(use_vision=False),
+            tools=self.coder_tools.registry(),
+        )
+        restored.config.history_limit = 2
+        restored.load(str(path))
+        restored.history.append(Turn("user", "ARCHIVE-90210の仕様を確認して"))
+        restored._turn_text = "ARCHIVE-90210の仕様を確認して"
+        messages = restored._messages()
+        latest_user = next(
+            message for message in reversed(messages) if message["role"] == "user")
+
+        self.assertEqual(len(restored.history), 3)
+        self.assertEqual(len(restored._archived_turns), 2)
+        self.assertIn(original, latest_user["content"])
+
     def test_native_coder_reasoning_uses_separate_bounded_budget(self):
         engine = CaptureEngine()
         engine.supports_thinking = True
