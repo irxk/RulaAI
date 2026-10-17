@@ -63,7 +63,7 @@
       document.title = "RulaCoder";
       document.querySelector(".logo").textContent = "RulaCoder";
       document.querySelector("#empty p").textContent =
-        "作業フォルダを選択し、既存の構成に合わせてコードの作成・編集・検証を行います。";
+        "作業フォルダを選択し、画像も使ってコードの作成・編集・検証を行います。";
       document.querySelectorAll(".chip").forEach((chip) => chip.hidden = true);
     } else {
       document.title = "Rula";
@@ -106,7 +106,7 @@
         badges.append(b);
       }
     }
-    $("attach").disabled = !(info.status === "ready" && info.vision) || $("profile").value === "coder";
+    $("attach").disabled = !(info.status === "ready" && info.vision);
     $("attach").title = info.vision ? "画像を添付" : "このモデルでは画像を読めません";
     $("think").disabled = !(info.status === "ready" && info.thinking);
     updateSend();
@@ -124,8 +124,7 @@
       medium: "中: 最大14回のツール利用。調査・実装・検証の標準。",
       large: "大: 最大32回のツール利用、最大6,144トークン。思考・調査・回答量を拡張。9Bモデルは同一。",
     }[$("coder-effort").value];
-    $("attach").disabled = coder || !(state.info && state.info.status === "ready" && state.info.vision);
-    if (coder) clearAttachment();
+    $("attach").disabled = !(state.info && state.info.status === "ready" && state.info.vision);
     updateSend();
   }
 
@@ -582,10 +581,6 @@
   // ---------------------------------------------------------------- images
   async function attachFile(file) {
     if (!file || !/^image\//.test(file.type)) return;
-    if ($("profile").value === "coder") {
-      $("hint").textContent = "Coderでは画像添付できません";
-      return;
-    }
     if (!state.info || !state.info.vision) {
       $("hint").textContent = "このモデルでは画像を読めません";
       return;

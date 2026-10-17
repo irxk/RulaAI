@@ -539,8 +539,6 @@ async def chat(req: ChatIn, request: Request):
     if req.profile == "coder":
         if not req.workspace:
             raise HTTPException(400, "Coderを使うには作業フォルダを選んでください。")
-        if req.image:
-            raise HTTPException(400, "Coderモードでは画像を使えません。")
         if req.coder_mode == "auto" and not req.auto_approved:
             raise HTTPException(403, "オートモードの作業フォルダ確認が必要です。")
         try:
