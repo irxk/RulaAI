@@ -83,10 +83,6 @@ STRAY_TAG_RE = re.compile(
     r"</?(tool_call|function_call|tool_response|im_start|im_end)>|<\|[^|]*\|>", re.I)
 
 
-# Above this, the turn has real source material rather than a couple of snippets,
-# and a structured write-up is the useful shape of answer.
-_RICH_MATERIAL_CHARS = 2000
-
 _JAPANESE_RE = re.compile(r"[ぁ-んァ-ン一-龥]")
 
 
@@ -599,7 +595,7 @@ class Agent:
                 if qtype == "code":
                     answer = fence_code(answer)
                 if needs_japanese_rewrite(user_input, answer):
-                    answer = self._rewrite_in_japanese(user_input, answer, scratch)
+                    answer = self._rewrite_in_japanese(user_input, answer)
                 answer = japanese_kanji(user_input, answer)
                 # "箇条書きで3つ" answered with 4: the count asked for is kept.
                 wanted = items_asked(instruction) if qtype != "problem" else None
@@ -1239,7 +1235,7 @@ class Agent:
         still = [w for w in check_arithmetic(fixed) if w not in skip]
         return fixed if len(still) < len(wrong) else answer
 
-    def _rewrite_in_japanese(self, question: str, answer: str, scratch: list[dict]) -> str:
+    def _rewrite_in_japanese(self, question: str, answer: str) -> str:
         """The paragraphs that slipped into Chinese, translated into Japanese.
 
         Measured on the answer that did ("180度" then a paragraph of Chinese):

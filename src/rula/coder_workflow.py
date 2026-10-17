@@ -187,7 +187,7 @@ class CoderWorkflow:
     def has_file_write(tool_calls: Iterable[tuple[str, str, str]]) -> bool:
         return any(
             name in _MUTATIONS and result.startswith(
-                ("保存しました:", "変更しました:", "変更なし:"))
+                ("保存しました:", "変更しました:"))
             for name, _, result in tool_calls
         )
 

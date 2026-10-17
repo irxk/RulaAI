@@ -27,7 +27,7 @@ import uuid
 from dataclasses import dataclass, field
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from ..agent import Agent, AgentConfig, Turn
