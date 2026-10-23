@@ -162,12 +162,14 @@ def _stop_process_tree(process: subprocess.Popen) -> bool:
 
 class CoderTools:
     def __init__(self, workspace: str, mode: str, auto_approved: bool = False,
-                 request_text: str = "", memory_root: str | None = None):
+                 request_text: str = "", memory_root: str | None = None,
+                 command_rules: dict[str, str] | None = None):
         self.workspace = Path(workspace).resolve(strict=True)
         if not self.workspace.is_dir():
             raise ValueError("作業フォルダが見つかりません。")
         self.mode = mode
         self.auto_approved = auto_approved
+        self.command_rules = dict(command_rules or {})
         self.project_memory = ProjectMemory(
             self.workspace,
             memory_root or os.path.join(
@@ -238,6 +240,10 @@ class CoderTools:
             "check_python", "Pythonファイルの構文を実行せずに検査する",
             "作業フォルダ相対の.pyファイルを1行に1つ (最大20ファイル)",
             self.check_python))
+        if self.mode in ("generate", "auto"):
+            registry.register(Tool(
+                "verify_project", "検出したテスト・ビルド・静的検査を実行して結果を集約する",
+                "引数なし", self.verify_project))
         registry.register(Tool(
             "project_info", "プロジェクト構成・開発指示・変更状態を確認する",
             "引数なし", self.project_info))
@@ -259,7 +265,7 @@ class CoderTools:
         registry.register(Tool(
             "ask_user", "要件が曖昧で作業を続けられないときにユーザーへ質問する",
             "質問文", self.ask_user))
-        if self.mode == "auto":
+        if self.mode in ("generate", "auto"):
             registry.register(Tool(
                 "write_file", "作業フォルダ内にファイルを新規作成または上書きする",
                 "相対パス :: ファイル全文", self.write_file))
@@ -684,9 +690,89 @@ class CoderTools:
             checks.append(".\\gradlew test")
         elif "build.gradle" in basenames or "build.gradle.kts" in basenames:
             checks.append("gradle test")
-        if "makefile" in basenames:
-            checks.append("make test (if the Makefile defines a test target)")
+        makefiles = [name for name in files if Path(name).name.casefold() == "makefile"]
+        for makefile in makefiles[:4]:
+            try:
+                contents = self._read_text(self._path(makefile))
+            except (OSError, UnicodeError):
+                continue
+            if re.search(r"(?m)^test(?::|\s*::)", contents):
+                directory = Path(makefile).parent.as_posix()
+                prefix = "" if directory == "." else f"cd {directory} && "
+                checks.append(prefix + "make test")
         return list(dict.fromkeys(checks))[:12]
+
+    def verify_project(self, argument: str = "") -> str:
+        if argument.strip():
+            return "このツールに引数は不要です。"
+        checks = self._project_checks()
+        python_syntax = any(path.endswith(".py") for path in self.changed_files())
+        if python_syntax:
+            python_files = [
+                path for path in self.changed_files() if path.endswith(".py")
+            ][:_MAX_PYTHON_CHECK_FILES]
+            syntax_result = self.check_python("\n".join(python_files))
+            if not syntax_result.startswith("Python構文OK:"):
+                return "検証失敗: Python構文検査\n" + syntax_result
+        else:
+            syntax_result = ""
+        python_only = any("check_pythonで構文検査" in check for check in checks)
+        commands = [check for check in checks if "check_pythonで構文検査" not in check]
+        results: list[tuple[str, str, str]] = (
+            [("Python構文検査", syntax_result, "ok")] if syntax_result else [])
+        if python_only and not commands:
+            python_files: list[str] = []
+            for root, dirs, files in os.walk(self.workspace, followlinks=False):
+                dirs[:] = sorted(
+                    name for name in dirs
+                    if name not in _SKIP_DIRS
+                    and not (Path(root) / name).is_symlink())
+                for name in sorted(files):
+                    path = Path(root) / name
+                    if name.endswith(".py") and not path.is_symlink():
+                        python_files.append(path.relative_to(self.workspace).as_posix())
+                        if len(python_files) >= _MAX_PYTHON_CHECK_FILES:
+                            break
+                if len(python_files) >= _MAX_PYTHON_CHECK_FILES:
+                    break
+            if python_files:
+                result = self.check_python("\n".join(python_files))
+                results.append(("Python構文検査", result, "ok" if
+                                result.startswith("Python構文OK:") else "failed"))
+        if not commands:
+            if results and all(status == "ok" for _, _, status in results):
+                return "検証完了: Python構文検査\n" + "\n".join(
+                    f"- {command}: {result}" for command, result, _ in results)
+            return ("検証未完了: プロジェクト設定から実行可能なテストや検査を検出できませんでした。"
+                    "関連テストや適切な静的検査を確認し、実行する場合はrun_commandを使ってください。")
+
+        limit = 8
+        skipped = max(0, len(commands) - limit)
+        for command in commands[:limit]:
+            result = self.run_command(command)
+            results.append((command, result, "ok" if (
+                re.search(r"(?m)^終了コード: 0\s*$", result)
+                or result.startswith((
+                    "サーバー起動完了: http://127.0.0.1:",
+                    "既存のローカルサーバー応答を確認: http://127.0.0.1:",
+                ))) else "blocked" if result.startswith((
+                    "ユーザーがコマンドを拒否しました。",
+                    "この作業フォルダの許可設定により、コマンドを禁止しました。",
+                    "コマンドを実行できません:",
+                )) else "failed"))
+        failed = sum(status == "failed" for _, _, status in results)
+        blocked = sum(status == "blocked" for _, _, status in results)
+        outcome = "検証完了" if not failed and not blocked and not skipped else (
+            "検証失敗" if failed else "検証未完了")
+        details = [
+            f"- {command}: {result[:3000]}"
+            for command, result, _ in results
+        ]
+        if skipped:
+            details.append(f"- 上限により未実行: 残り{skipped}件")
+        if blocked:
+            details.append(f"- 承認・禁止ルールにより実行されなかった検査: {blocked}件")
+        return f"{outcome}: {len(results)}件実行\n" + "\n".join(details)
 
     def _project_info(self, argument: str = "") -> str:
         if argument.strip():
@@ -1088,9 +1174,14 @@ class CoderTools:
             return "コマンドが空です。"
         if len(command) > 4000:
             return "コマンドが長すぎるため実行を中止しました (上限 4,000文字)。"
+        if self.mode not in ("generate", "auto"):
+            return "このCoderモードではターミナルを利用できません。"
         if self.mode == "auto" and not self.auto_approved:
             return "オートモードの開始確認がないため、コマンドを実行しませんでした。"
-        if self.mode != "auto":
+        action = self.command_rules.get(command.strip(), "ask")
+        if action == "deny":
+            return "この作業フォルダの許可設定により、コマンドを禁止しました。"
+        if action != "allow":
             if self.interact is None:
                 return "コマンドを実行できません: ユーザー承認が利用できません。"
             approved = self.interact("command", command=command)

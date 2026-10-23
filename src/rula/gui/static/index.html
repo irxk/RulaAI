@@ -59,15 +59,18 @@
         </select>
         <select id="coder-mode" aria-label="Coderモード" hidden>
           <option value="plan">計画</option>
-          <option value="chat">対話</option>
+          <option value="chat">AIアシスタント</option>
+          <option value="generate">コード生成AI</option>
           <option value="auto">オート</option>
         </select>
+        <span id="coder-mode-description" class="mode-description" hidden></span>
         <select id="coder-effort" aria-label="Coder性能" hidden>
           <option value="small">小 · 速い</option>
           <option value="medium" selected>中 · 標準</option>
           <option value="large">大 · 深く作業</option>
         </select>
         <button id="workspace-select" type="button" hidden>作業フォルダを選択</button>
+        <button id="command-policy-open" type="button" hidden>ターミナル許可設定</button>
         <span id="workspace-name" hidden></span>
       </div>
       <textarea id="input" rows="1" placeholder="メッセージを入力 (Enterで送信 / Shift+Enterで改行)"></textarea>
@@ -103,6 +106,31 @@
       <button id="interaction-deny" type="button" hidden>拒否</button>
       <button id="interaction-submit" type="button">回答する</button>
       <button id="interaction-approve" type="button" hidden>承認して実行</button>
+    </div>
+  </div>
+</div>
+
+<div id="command-policy" class="interaction" hidden role="dialog" aria-modal="true"
+     aria-labelledby="command-policy-title">
+  <div class="interaction-card command-policy-card">
+    <h2 id="command-policy-title">作業フォルダのターミナル許可設定</h2>
+    <p>登録していないコマンドは毎回確認します。許可・禁止ルールはこの作業フォルダだけに適用されます。
+      コマンドはこのPC内に保存されるため、パスワードやトークンを含めないでください。</p>
+    <div id="command-policy-rules"></div>
+    <label for="command-policy-input">コマンド全体を完全一致で登録</label>
+    <textarea id="command-policy-input" rows="2"
+              placeholder="例: python -m pytest -q"></textarea>
+    <div class="command-policy-add">
+      <select id="command-policy-action" aria-label="コマンドの許可動作">
+        <option value="ask">実行ごとに確認</option>
+        <option value="allow">このフォルダで許可</option>
+        <option value="deny">このフォルダで禁止</option>
+      </select>
+      <button id="command-policy-add" type="button">ルールを追加</button>
+    </div>
+    <div class="interaction-actions">
+      <button id="command-policy-close" type="button">閉じる</button>
+      <button id="command-policy-save" type="button">設定を保存</button>
     </div>
   </div>
 </div>

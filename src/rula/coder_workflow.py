@@ -88,7 +88,7 @@ class CoderWorkflow:
     effort: str
 
     def __post_init__(self):
-        if self.mode not in ("plan", "chat", "auto"):
+        if self.mode not in ("plan", "chat", "generate", "auto"):
             raise ValueError(f"unknown Coder mode: {self.mode}")
         if self.effort not in _EFFORTS:
             raise ValueError(f"unknown Coder effort: {self.effort}")
@@ -110,11 +110,17 @@ class CoderWorkflow:
                 "変更・コマンド実行はしません。"
                 "実施していない手順を完了扱いにしないでください。"),
             "chat": (
-                "対話モードです。作業フォルダを調べて根拠に沿って説明・提案します。"
+                "AIアシスタントモードです。作業フォルダを調べて根拠に沿って説明・提案します。"
                 "ファイル変更やコマンド実行はしません。"),
+            "generate": (
+                "コード生成AIモードです。依頼に応じて作業フォルダ内のファイルを作成・編集し、"
+                "差分レビューと関連するテスト・検査を行います。ターミナルの各コマンドは"
+                "作業フォルダの許可設定に従い、初期設定では実行前にユーザーへ確認します。"),
             "auto": (
                 "オートモードです。開始時に確認された作業フォルダ内で、依頼を実装し、"
-                "差分レビューと実行可能な検証を行います。計画・調査を繰り返さず、"
+                "差分レビューと実行可能な検証を行います。ターミナルは作業フォルダの"
+                "コマンド許可設定に従い、未登録のコマンドは実行前にユーザーへ確認します。"
+                "計画・調査を繰り返さず、"
                 "project_info等で状況を把握した後は追加調査を合計5回以内に抑え、"
                 "実装可能なら早く変更に進みます。")
         }[self.mode]
@@ -153,7 +159,8 @@ class CoderWorkflow:
             "既存の設計・依存・命名を尊重し、関連箇所へ最小限に統合し、重複実装を避けます。"
             "計画は複数段階の作業で共有し、同じ計画や調査を繰り返しません。"
             "計画は行動の代わりではありません。実装可能なら早く変更に進み、"
-            "必要なファイルをwrite_file/edit_file/apply_patchで作業フォルダへ保存します。"
+            "コード生成AI・オートモードでは、必要なファイルを"
+            "write_file/edit_file/apply_patchで作業フォルダへ保存します。"
             "ファイル変更後は差分をレビューし、関連するテスト・ビルド・型検査・構文検査を実行します。"
             "project_infoにあるプロジェクト固有の検証候補から変更に関係するものを選びます。"
             "Pythonの構文検査はcheck_python、プロジェクト固有のコマンドはrun_commandを使います。"
@@ -213,7 +220,7 @@ class CoderWorkflow:
         validation = next(
             ((name, argument, result)
              for name, argument, result in reversed(tool_calls[review + 1:])
-             if (name == "check_python"
+             if (name in ("check_python", "verify_project")
                  or (name == "run_command"
                      and (result.startswith((
                          "サーバー起動完了: http://127.0.0.1:",
@@ -224,8 +231,18 @@ class CoderWorkflow:
         if validation is None:
             return "verify"
         name, _, result = validation
+        if result.startswith((
+                "ユーザーがコマンドを拒否しました。",
+                "この作業フォルダの許可設定により、コマンドを禁止しました。",
+                "コマンドを実行できません: ユーザー承認が利用できません。",
+        )):
+            return "verify"
         if name == "check_python":
             return None if result.startswith("Python構文OK:") else "repair"
+        if name == "verify_project":
+            if result.startswith("検証完了:"):
+                return None
+            return "repair" if result.startswith("検証失敗:") else "verify"
         if result.startswith((
                 "サーバー起動完了: http://127.0.0.1:",
                 "既存のローカルサーバー応答を確認: http://127.0.0.1:")):

@@ -13,7 +13,9 @@ source_root = Path(os.environ.get(
 sys.path.insert(0, str(source_root))
 
 from rula.agent import Agent, AgentConfig, Trace, Turn
+from rula.coder_workflow import CoderWorkflow
 from rula.tools.coder import CoderTools
+from rula.tools.command_permissions import CommandPermissionStore
 
 
 class CaptureEngine:
@@ -48,7 +50,9 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
-        self.coder_tools = CoderTools(self.temp_dir.name, "auto")
+        self.coder_tools = CoderTools(
+            self.temp_dir.name, "auto",
+            command_rules={"python -m compileall .": "allow"})
         self.agent = Agent(
             engine=object(),
             config=AgentConfig(use_vision=False, max_tool_calls=8),
@@ -608,12 +612,77 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
         self.assertIn("終了コード: 0", trace.tool_calls[-1][2])
         self.assertEqual(answer, "変更を確認し、検証コマンドも成功しました。")
 
+    def test_auto_coder_repeats_repair_review_and_validation_until_success(self):
+        self.agent.config.coder_auto = True
+        self.agent.config.max_tool_calls = 20
+        outputs = iter([
+            "変更をレビューします。",
+            "<tool>review_changes</tool>",
+            "レビューしました。",
+            "<tool>run_command: pytest -q</tool>",
+            "テストに失敗しました。",
+            "<tool>edit_file: app.py :: first :: second</tool>",
+            "修正しました。",
+            "<tool>review_changes</tool>",
+            "再レビューしました。",
+            "<tool>run_command: pytest -q</tool>",
+            "まだ失敗しています。",
+            "<tool>edit_file: app.py :: second :: third</tool>",
+            "2回目の修正をしました。",
+            "<tool>review_changes</tool>",
+            "再度レビューしました。",
+            "<tool>run_command: pytest -q</tool>",
+            "変更を確認し、テストに成功しました。",
+        ])
+        validation_results = iter([
+            "終了コード: 1\nFAILED once",
+            "終了コード: 1\nFAILED twice",
+            "終了コード: 0\nOK",
+        ])
+        prompts = []
+
+        def generate(scratch, **_kwargs):
+            prompts.append([dict(message) for message in scratch])
+            return next(outputs)
+
+        def use_tool(name, argument, _scratch, trace):
+            if name == "run_command":
+                result = next(validation_results)
+            elif name == "edit_file":
+                result = "変更しました: app.py"
+            else:
+                result = "--- a/app.py\n+++ b/app.py"
+            trace.tool_calls.append((name, argument, result))
+
+        self.agent._generate = generate
+        self.agent._use_tool = use_tool
+        self.agent.config.coder_auto = True
+        trace = Trace(tool_calls=[
+            ("write_file", "app.py :: first", "保存しました: app.py")
+        ])
+
+        answer = self.agent._answer_or_tool([], trace)
+
+        self.assertEqual(
+            [name for name, _, _ in trace.tool_calls].count("run_command"), 3)
+        self.assertEqual(
+            [name for name, _, _ in trace.tool_calls].count("review_changes"), 3)
+        self.assertEqual(
+            [name for name, _, _ in trace.tool_calls].count("edit_file"), 2)
+        repair_instructions = sum(
+            message["content"].count("直前のテスト・構文検査・ビルドは失敗しました。")
+            for message in prompts[-1])
+        self.assertEqual(repair_instructions, 2)
+        self.assertEqual(answer, "変更を確認し、テストに成功しました。")
+
     def test_auto_coder_does_not_claim_success_when_review_is_skipped(self):
         self.agent.config.coder_auto = True
         outputs = iter([
             "<tool>write_file: app.py :: print('ready')\n</tool>",
             "変更完了です。",
             "レビューは後で行います。完了しました。",
+            "まだレビューはしていません。",
+            "これ以上レビューできません。",
         ])
         self.agent._generate = lambda _scratch, **_kwargs: next(outputs)
 
@@ -713,6 +782,16 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
         ])
 
         self.assertEqual(self.agent._coder_completion_stage(trace), "repair")
+
+    def test_denied_validation_is_not_misreported_as_a_code_failure(self):
+        trace = Trace(tool_calls=[
+            ("write_file", "app.py :: print('ready')", "保存しました: app.py"),
+            ("review_changes", "", "--- a/app.py\n+++ b/app.py"),
+            ("run_command", "pytest -q",
+             "ユーザーがコマンドを拒否しました。変更を加えずに続行してください。"),
+        ])
+
+        self.assertEqual(self.agent._coder_completion_stage(trace), "verify")
 
     def test_auto_coder_keeps_write_tools_enabled_after_project_info(self):
         self.agent.engine = CaptureEngine()
@@ -926,6 +1005,7 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
 
     def test_approved_auto_command_runs_without_an_interaction_prompt(self):
         self.coder_tools.auto_approved = True
+        self.coder_tools.command_rules["echo ok"] = "allow"
         with patch("rula.tools.coder.subprocess.run") as run:
             run.return_value = type("Result", (), {"returncode": 0, "stdout": "ok"})()
             result = self.coder_tools.run_command("echo ok")
@@ -933,6 +1013,130 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
         self.assertIn("終了コード: 0", result)
         run.assert_called_once()
         self.assertIsNone(self.coder_tools.interact)
+
+    def test_unconfigured_command_requires_approval_even_in_auto_mode(self):
+        self.coder_tools.auto_approved = True
+        interactions = []
+
+        def approve(kind, **data):
+            interactions.append((kind, data["command"]))
+            return "approved"
+
+        self.coder_tools.interact = approve
+        with patch("rula.tools.coder.subprocess.run") as run:
+            run.return_value = type("Result", (), {"returncode": 0, "stdout": "ok"})()
+            result = self.coder_tools.run_command("echo ask-first")
+
+        self.assertIn("終了コード: 0", result)
+        self.assertEqual(interactions, [("command", "echo ask-first")])
+        run.assert_called_once()
+
+    def test_denied_command_never_runs_even_when_workspace_is_approved(self):
+        self.coder_tools.auto_approved = True
+        self.coder_tools.command_rules["echo forbidden"] = "deny"
+        with patch("rula.tools.coder.subprocess.run") as run:
+            result = self.coder_tools.run_command("echo forbidden")
+
+        self.assertIn("許可設定", result)
+        run.assert_not_called()
+
+    def test_generation_mode_allows_file_tools_but_other_modes_remain_read_only(self):
+        generation = CoderTools(self.temp_dir.name, "generate").registry()
+        assistant = CoderTools(self.temp_dir.name, "chat").registry()
+        planning = CoderTools(self.temp_dir.name, "plan").registry()
+
+        self.assertIn("write_file", generation.names())
+        self.assertIn("run_command", generation.names())
+        self.assertNotIn("write_file", assistant.names())
+        self.assertNotIn("run_command", assistant.names())
+        self.assertNotIn("write_file", planning.names())
+        self.assertNotIn("run_command", planning.names())
+
+    def test_generation_mode_runs_terminal_commands_after_confirmation(self):
+        tools = CoderTools(self.temp_dir.name, "generate")
+        interactions = []
+        tools.interact = lambda kind, **data: (
+            interactions.append((kind, data["command"])) or "approved")
+        with patch("rula.tools.coder.subprocess.run") as run:
+            run.return_value = type("Result", (), {"returncode": 0, "stdout": "ok"})()
+            result = tools.run_command("pytest -q")
+
+        self.assertIn("終了コード: 0", result)
+        self.assertEqual(interactions, [("command", "pytest -q")])
+        run.assert_called_once()
+
+    def test_workspace_command_permission_store_is_scoped_and_validated(self):
+        with tempfile.TemporaryDirectory() as data:
+            store = CommandPermissionStore(data)
+            rules = [{"command": "pytest -q", "action": "allow"}]
+            saved = store.set(self.temp_dir.name, rules)
+
+            self.assertEqual(saved, rules)
+            self.assertEqual(store.get(self.temp_dir.name), rules)
+            with self.assertRaisesRegex(ValueError, "重複"):
+                store.set(self.temp_dir.name, rules + rules)
+            with self.assertRaisesRegex(ValueError, "action|許可設定"):
+                store.set(self.temp_dir.name, [{"command": "pytest", "action": "always"}])
+
+    def test_verify_project_runs_detected_tests_and_build_and_aggregates_results(self):
+        Path(self.temp_dir.name, "package.json").write_text(
+            '{"scripts":{"test":"vitest run","build":"vite build"}}',
+            encoding="utf-8")
+        tools = CoderTools(
+            self.temp_dir.name, "auto", auto_approved=True,
+            command_rules={
+                "npm run test": "allow",
+                "npm run build": "allow",
+            })
+        executed = []
+
+        def run(command):
+            executed.append(command)
+            return "終了コード: 0\nOK"
+
+        tools.run_command = run
+        result = tools.verify_project()
+
+        self.assertTrue(result.startswith("検証完了:"))
+        self.assertEqual(executed, ["npm run test", "npm run build"])
+
+    def test_verify_project_does_not_assume_make_test_target_exists(self):
+        makefile = Path(self.temp_dir.name, "Makefile")
+        makefile.write_text("build:\n\tpython build.py\n", encoding="utf-8")
+        tools = CoderTools(self.temp_dir.name, "auto")
+
+        self.assertNotIn("make test", tools._project_checks())
+
+        makefile.write_text("test:\n\tpython -m unittest\n", encoding="utf-8")
+
+        self.assertIn("make test", tools._project_checks())
+
+    def test_verify_project_marks_failed_or_blocked_checks_as_incomplete(self):
+        Path(self.temp_dir.name, "package.json").write_text(
+            '{"scripts":{"test":"vitest run"}}', encoding="utf-8")
+        tools = CoderTools(self.temp_dir.name, "generate")
+        tools.run_command = lambda _command: "ユーザーがコマンドを拒否しました。"
+
+        result = tools.verify_project()
+
+        self.assertTrue(result.startswith("検証未完了:"))
+        self.assertEqual(
+            CoderWorkflow.completion_stage([
+                ("write_file", "index.html :: content", "保存しました: index.html"),
+                ("review_changes", "", "差分"),
+                ("verify_project", "", result),
+            ]),
+            "verify",
+        )
+
+    def test_verify_project_checks_changed_python_syntax_before_running_tests(self):
+        tools = CoderTools(self.temp_dir.name, "auto")
+        tools.write_file("app.py :: def broken(:\n pass")
+
+        result = tools.verify_project()
+
+        self.assertTrue(result.startswith("検証失敗: Python構文検査"))
+        self.assertIn("app.py:1", result)
 
     def test_local_server_command_is_recognized_without_blocking_shell_commands(self):
         from rula.tools.coder import _local_http_port
@@ -988,6 +1192,7 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
 
     def test_approved_local_server_returns_after_localhost_is_ready(self):
         self.coder_tools.auto_approved = True
+        self.coder_tools.command_rules["python3 -m http.server 8000"] = "allow"
         process = type("Process", (), {"pid": 4321, "poll": lambda _self: None})()
         with patch("rula.tools.coder.subprocess.Popen", return_value=process) as popen, \
                 patch("rula.tools.coder._local_http_responds", return_value=False), \
@@ -1002,6 +1207,7 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
 
     def test_existing_local_server_is_reported_without_duplicate_launch(self):
         self.coder_tools.auto_approved = True
+        self.coder_tools.command_rules["python3 -m http.server 8000"] = "allow"
         with patch("rula.tools.coder._local_http_responds", return_value=True), \
                 patch("rula.tools.coder.subprocess.Popen") as popen:
             result = self.coder_tools.run_command("python3 -m http.server 8000")
@@ -1012,6 +1218,7 @@ class ToolProtocolRecoveryTests(unittest.TestCase):
 
     def test_local_server_startup_failure_is_reported_and_process_is_stopped(self):
         self.coder_tools.auto_approved = True
+        self.coder_tools.command_rules["python3 -m http.server 8001"] = "allow"
         process = type("Process", (), {"pid": 4322, "poll": lambda _self: None})()
         with patch("rula.tools.coder.subprocess.Popen", return_value=process), \
                 patch("rula.tools.coder._local_http_responds", return_value=False), \

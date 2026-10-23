@@ -962,7 +962,7 @@ class Agent:
         repeated_call_count = 1 if previous_call is not None else 0
         remaining_calls = max(0, self.config.max_tool_calls - len(trace.tool_calls))
         implementation_nudge_attempts = 0
-        completion_nudges: set[str] = set()
+        completion_nudges: dict[str, int] = {}
         for _ in range(remaining_calls):
             # Once material has been gathered this pass is the answer itself, and a
             # long write-up is worth streaming. Before that the output might turn out
@@ -1018,8 +1018,21 @@ class Agent:
                 completion_stage = (
                     self._coder_completion_stage(trace) if self.config.coder_auto else None)
                 if completion_stage:
-                    if completion_stage not in completion_nudges:
-                        completion_nudges.add(completion_stage)
+                    retry_limit = {"review": 2, "verify": 2, "repair": 3}.get(
+                        completion_stage, 1)
+                    retry_key = completion_stage
+                    if completion_stage in ("review", "verify"):
+                        last_mutation = max(
+                            (index for index, (name, _, result) in
+                             enumerate(trace.tool_calls)
+                             if name in ("write_file", "edit_file", "apply_patch")
+                             and result.startswith(("保存しました:", "変更しました:"))),
+                            default=-1,
+                        )
+                        retry_key = f"{completion_stage}:{last_mutation}"
+                    attempts = completion_nudges.get(retry_key, 0)
+                    if attempts < retry_limit:
+                        completion_nudges[retry_key] = attempts + 1
                         if self.on_progress is not None:
                             self.on_progress(
                                 "変更差分をレビューしています"
@@ -1034,14 +1047,17 @@ class Agent:
                             else
                             "直前のテスト・構文検査・ビルドは失敗しました。失敗出力に示された"
                             "対象ファイルとエラーを特定し、edit_file / apply_patch / write_file で"
-                            "実際に修正してください。その後、review_changes と同じ検証を再実行してください。"
+                            "実際に修正してください。その後、review_changes と verify_project を再実行してください。"
                             "別の成功しやすいコマンドに置き換えてはいけません。修正・再検証の結果を"
                             "確認するまで完了と報告しないでください。"
                             if completion_stage == "repair"
                             else
                             "差分レビューは完了しましたが、変更後の検証がまだありません。"
-                            "プロジェクトに合ったテスト・ビルド・静的検査を run_command で実行してください。"
+                            "まずverify_projectでプロジェクトから検出したテスト・ビルド・静的検査を実行してください。"
+                            "候補が検出されない場合だけ、プロジェクトに合った検証をrun_commandで実行してください。"
                             "Pythonだけの変更で実行可能なテストがなければ check_python で構文を検査してください。"
+                            "コマンドが拒否または禁止された場合はコードの不具合と誤認せず、"
+                            "追加の許可を求めるか未検証と明示してください。"
                             "検証結果を確認するまで完了と報告しないでください。")
                         scratch.append({"role": "user", "content": instruction})
                         continue
@@ -1284,6 +1300,8 @@ class Agent:
                 "write_file": "保存結果を確認し、成功が明示されている場合だけ変更したと報告してください。",
                 "edit_file": "編集結果を確認し、成功が明示されている場合だけ変更したと報告してください。",
                 "apply_patch": "各ファイルの変更結果を確認し、成功が明示されている場合だけ変更したと報告してください。",
+                "verify_project": "プロジェクトから検出したテスト・ビルド・静的検査をすべて確認してください。"
+                                 "結果が未完了なら未実行の検査を実施し、失敗なら原因を修正して再レビュー・再検証してください。",
                 "review_changes": "差分を確認し、意図しない変更や不要なファイルがないかを点検してください。",
                 "run_command": "終了コードと出力を確認してください。失敗した場合は原因を説明するか、"
                                "修正案を提示してください。サーバー起動完了の場合はlocalhostのURLへ進み、"

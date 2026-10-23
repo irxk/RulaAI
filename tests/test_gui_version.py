@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ from rula.agent import AgentConfig
 from rula.coder_agent import CoderAgent
 from rula.coder_workflow import CoderWorkflow
 from rula.tools import default_registry
+from rula.tools.coder import CoderTools
 from rula.gui import server
 from rula.version import __version__
 
@@ -47,6 +49,27 @@ class GuiVersionTests(unittest.TestCase):
         self.assertIn("差分レビュー", workflow)
         self.assertIn("無関係な成功コマンド", workflow)
 
+    def test_coder_modes_separate_assistant_generation_and_autonomy(self):
+        assistant = CoderWorkflow("chat", "medium").system_prompt()
+        generation = CoderWorkflow("generate", "medium").system_prompt()
+        autonomous = CoderWorkflow("auto", "medium").system_prompt()
+
+        self.assertIn("ファイル変更やコマンド実行はしません", assistant)
+        self.assertIn("作業フォルダ内のファイルを作成・編集", generation)
+        self.assertIn("実行前にユーザーへ確認", generation)
+        self.assertIn("未登録のコマンド", autonomous)
+
+    def test_generation_mode_enables_mutations_and_requires_completion_checks(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            registry = CoderTools(workspace, "generate").registry()
+            agent = CoderAgent(
+                SimpleNamespace(supports_thinking=False), AgentConfig(), default_registry())
+            agent.configure_request("generate", "medium", registry,
+                                    request_text="既存のコードを修正して")
+
+        self.assertIn("write_file", registry.names())
+        self.assertIn("run_command", registry.names())
+        self.assertTrue(agent.config.coder_auto)
     def test_coder_prompt_classifies_different_software_tasks(self):
         cases = {
             "login is broken; fix the error": "bugfix",
@@ -110,7 +133,7 @@ class GuiVersionTests(unittest.TestCase):
 
     def test_stream_guard_recognizes_each_new_coder_tool(self):
         for name in ("find_files", "find_symbol", "read_files", "project_memory",
-                     "file_outline", "check_python"):
+                     "file_outline", "check_python", "verify_project"):
             with self.subTest(name=name):
                 self.assertIn(name, server._TOOL_WORDS)
 
@@ -156,6 +179,32 @@ class GuiVersionTests(unittest.TestCase):
             self.assertEqual(server._profile_for_app("general"), "coder")
             self.assertEqual(server._profile_for_app("fast"), "coder")
 
+    def test_workspace_command_permissions_api_persists_exact_rules(self):
+        request = Request({
+            "type": "http",
+            "headers": [
+                (b"host", b"127.0.0.1:43127"),
+                (b"x-rula-token", b"test-token"),
+            ],
+        })
+        with tempfile.TemporaryDirectory() as workspace, \
+                tempfile.TemporaryDirectory() as data, \
+                patch.dict(server.STATE, {"token": "test-token", "port": 43127}), \
+                patch.object(server, "DATA", data):
+            body = server.CommandPermissionsIn(
+                workspace=workspace,
+                rules=[
+                    {"command": "python -m pytest -q", "action": "allow"},
+                    {"command": "Remove-Item *", "action": "deny"},
+                ],
+            )
+            saved = server.save_command_permissions(body, request)
+            loaded = server.get_command_permissions(request, workspace)
+
+        self.assertEqual(saved["rules"], loaded["rules"])
+        self.assertEqual([rule["action"] for rule in loaded["rules"]],
+                         ["allow", "deny"])
+
     def test_switch_endpoint_requests_window_close_with_local_token(self):
         request = Request({
             "type": "http",
@@ -180,11 +229,15 @@ class GuiVersionTests(unittest.TestCase):
     def test_dedicated_coder_ui_is_locked_to_coder_profile(self):
         static = source_root / "rula" / "gui" / "static"
         app_js = (static / "app.js").read_text(encoding="utf-8")
+        app_html = (static / "index.html").read_text(encoding="utf-8")
         server_source = (source_root / "rula" / "gui" / "server.py").read_text(
             encoding="utf-8")
         root = source_root.parent
 
         self.assertIn('option.hidden = coder ? option.value !== "coder"', app_js)
+        self.assertIn('<option value="generate">コード生成AI</option>', app_html)
+        self.assertIn("ターミナル許可設定", app_html)
+        self.assertIn("command-permissions", app_js)
         self.assertIn('req.profile = _profile_for_app(req.profile)', server_source)
         self.assertIn('"RulaCoder" if APP_MODE == "coder" else "Rula"', server_source)
         launcher = (root / "launcher" / "RulaLauncher.cs").read_text(encoding="utf-8")

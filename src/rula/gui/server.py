@@ -36,6 +36,7 @@ from ..engine import build_engine
 from ..memory import Memory
 from ..tools import default_registry
 from ..tools.coder import CoderTools
+from ..tools.command_permissions import CommandPermissionStore
 from ..version import __version__
 
 log = logging.getLogger("rula.gui")
@@ -70,7 +71,7 @@ def _tool_words() -> list[str]:
         "file_outline", "search_code", "check_python", "project_info", "project_memory",
         "update_plan",
         "git_status", "git_diff", "ask_user", "write_file", "edit_file",
-        "apply_patch", "review_changes", "run_command",
+        "apply_patch", "review_changes", "run_command", "verify_project",
     }
     words = ({n.lower() for n in default_registry().names()}
              | {a.lower() for a in ALIASES} | coder_tool_words)
@@ -113,7 +114,9 @@ _TOOL_LABELS = {"search": "検索しています", "deep_search": "ページを�
                 "git_diff": "Git差分を確認しています",
                 "write_file": "ファイルを保存しています", "edit_file": "ファイルを編集しています",
                 "apply_patch": "変更を適用しています", "review_changes": "変更差分を確認しています",
-                "run_command": "コマンドを実行しています", "ask_user": "質問しています"}
+                "run_command": "コマンドを実行しています",
+                "verify_project": "プロジェクトの検証を実行しています",
+                "ask_user": "質問しています"}
 
 
 def _coder_activity_detail(name: str, argument: str) -> str:
@@ -138,6 +141,8 @@ def _coder_activity_detail(name: str, argument: str) -> str:
         return command[:240]
     if name in ("read_file", "find_files", "file_outline", "check_python", "git_diff"):
         return value.split(" :: ", 1)[0][:240]
+    if name == "verify_project":
+        return "プロジェクト設定から検証候補を実行"
     if name in ("search_code", "find_symbol"):
         return value[:120]
     if name == "read_files":
@@ -146,6 +151,8 @@ def _coder_activity_detail(name: str, argument: str) -> str:
 
 
 def _coder_activity_result(name: str, result: str) -> str:
+    if name == "verify_project":
+        return re.sub(r"\s+", " ", result).strip()[:240]
     if name == "run_command":
         if result.startswith((
                 "サーバー起動完了: ", "既存のローカルサーバー応答を確認: ")):
@@ -193,6 +200,8 @@ def _coder_activity_result(name: str, result: str) -> str:
 
 
 def _coder_tool_succeeded(name: str, result: str) -> bool:
+    if name == "verify_project":
+        return result.startswith("検証完了:")
     if name in ("write_file", "edit_file"):
         return result.startswith(("保存しました:", "変更なし:"))
     if name == "apply_patch":
@@ -507,6 +516,16 @@ class InteractionIn(BaseModel):
     response: str = ""
 
 
+class CommandRuleIn(BaseModel):
+    command: str
+    action: str
+
+
+class CommandPermissionsIn(BaseModel):
+    workspace: str
+    rules: list[CommandRuleIn]
+
+
 @app.post("/api/interaction")
 def answer_interaction(body: InteractionIn, request: Request):
     _check(request)
@@ -517,6 +536,41 @@ def answer_interaction(body: InteractionIn, request: Request):
         pending.response = body.response[:8000]
         pending.event.set()
     return {"ok": True}
+
+
+def _command_permissions_store() -> CommandPermissionStore:
+    return CommandPermissionStore(os.path.join(DATA, "command-permissions"))
+
+
+def _permission_workspace(workspace: str) -> str:
+    path = os.path.realpath(workspace)
+    if not os.path.isdir(path):
+        raise HTTPException(400, "作業フォルダが見つかりません。")
+    return path
+
+
+@app.get("/api/workspace/command-permissions")
+def get_command_permissions(request: Request, workspace: str):
+    _check(request)
+    path = _permission_workspace(workspace)
+    try:
+        rules = _command_permissions_store().get(path)
+    except ValueError as exc:
+        raise HTTPException(500, str(exc)) from exc
+    return {"rules": rules}
+
+
+@app.put("/api/workspace/command-permissions")
+def save_command_permissions(body: CommandPermissionsIn, request: Request):
+    _check(request)
+    path = _permission_workspace(body.workspace)
+    try:
+        rules = _command_permissions_store().set(
+            path, [{"command": rule.command, "action": rule.action}
+                   for rule in body.rules])
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"rules": rules}
 
 
 @app.post("/api/chat")
@@ -532,7 +586,7 @@ async def chat(req: ChatIn, request: Request):
         raise HTTPException(400, "image must be a data URI")
     if req.profile not in ("general", "fast", "quality", "coder"):
         raise HTTPException(400, "unknown profile")
-    if req.coder_mode not in ("plan", "chat", "auto"):
+    if req.coder_mode not in ("plan", "chat", "generate", "auto"):
         raise HTTPException(400, "unknown coder mode")
     if req.coder_effort not in ("small", "medium", "large"):
         raise HTTPException(400, "unknown coder effort")
@@ -542,9 +596,11 @@ async def chat(req: ChatIn, request: Request):
         if req.coder_mode == "auto" and not req.auto_approved:
             raise HTTPException(403, "オートモードの作業フォルダ確認が必要です。")
         try:
+            permissions = _command_permissions_store().get(req.workspace)
             coder_tools = CoderTools(
                 req.workspace, req.coder_mode, auto_approved=req.auto_approved,
-                request_text=text, memory_root=os.path.join(DATA, "project-memory"))
+                request_text=text, memory_root=os.path.join(DATA, "project-memory"),
+                command_rules={rule["command"]: rule["action"] for rule in permissions})
         except (OSError, ValueError) as exc:
             raise HTTPException(400, f"作業フォルダを開けません: {exc}") from exc
     else:
@@ -677,6 +733,7 @@ async def chat(req: ChatIn, request: Request):
                 elif req.profile == "coder":
                     emit("status", text={"plan": "作業フォルダを調査しています",
                                          "chat": "コードを確認しています",
+                                         "generate": "コードを生成し、実装と検証を行っています",
                                          "auto": "依頼を確認し、作業手順を組み立てています"}[req.coder_mode])
                 question = text or "この画像について説明してください。"
                 answer, trace = agent.ask(question, image_ref=req.image)

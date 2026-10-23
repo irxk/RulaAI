@@ -16,7 +16,7 @@
   const state = { chatId: null, busy: false, image: null, thumb: null, think: false, info: null,
                   appMode: "general",
                   workspace: localStorage.getItem("rula-workspace") || "", interaction: null,
-                  autoConfirmedWorkspaces: new Set() };
+                  autoConfirmedWorkspaces: new Set(), commandRules: [] };
 
   async function api(path, opts = {}) {
     opts.headers = Object.assign({ "X-Rula-Token": TOKEN }, opts.headers || {});
@@ -115,8 +115,17 @@
   function updateProfile() {
     const coder = $("profile").value === "coder";
     $("coder-mode").hidden = !coder;
+    $("coder-mode-description").hidden = !coder;
+    $("coder-mode-description").textContent = {
+      plan: "計画のみ・変更なし",
+      chat: "調査と提案のみ・変更なし",
+      generate: "編集と検証・コマンドは許可設定に従う",
+      auto: "自律実装・未登録コマンドは確認",
+    }[$("coder-mode").value];
     $("coder-effort").hidden = !coder;
     $("workspace-select").hidden = !coder;
+    $("command-policy-open").hidden = !coder;
+    $("command-policy-open").disabled = !state.workspace || state.busy;
     $("workspace-name").hidden = !coder;
     $("workspace-name").textContent = state.workspace || "未選択";
     $("coder-effort").title = {
@@ -135,6 +144,7 @@
       if (data.workspace) {
         state.workspace = data.workspace;
         localStorage.setItem("rula-workspace", state.workspace);
+        state.commandRules = [];
       }
       updateProfile();
     } catch (e) {
@@ -456,7 +466,80 @@
     state.busy = b;
     document.body.classList.toggle("busy", b);
     $("new-chat").disabled = b;
+    $("command-policy-open").disabled = b || !state.workspace;
     updateSend();
+  }
+
+  function renderCommandRules() {
+    const list = $("command-policy-rules");
+    list.innerHTML = "";
+    if (!state.commandRules.length) {
+      list.append(el("p", "command-policy-empty", "ルールなし（すべて実行前に確認）"));
+      return;
+    }
+    state.commandRules.forEach((rule, index) => {
+      const row = el("div", "command-policy-rule");
+      const command = document.createElement("code");
+      command.textContent = rule.command;
+      const action = document.createElement("select");
+      action.setAttribute("aria-label", rule.command + " の許可動作");
+      for (const [value, label] of [
+        ["ask", "実行ごとに確認"],
+        ["allow", "このフォルダで許可"],
+        ["deny", "このフォルダで禁止"],
+      ]) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = label;
+        option.selected = value === rule.action;
+        action.append(option);
+      }
+      action.addEventListener("change", () => {
+        state.commandRules[index].action = action.value;
+      });
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "削除";
+      remove.addEventListener("click", () => {
+        state.commandRules.splice(index, 1);
+        renderCommandRules();
+      });
+      row.append(command, action, remove);
+      list.append(row);
+    });
+  }
+
+  async function openCommandPolicy() {
+    if (!state.workspace) return;
+    $("command-policy-open").disabled = true;
+    try {
+      const query = new URLSearchParams({ workspace: state.workspace });
+      const data = await (await api("/api/workspace/command-permissions?" + query)).json();
+      state.commandRules = data.rules || [];
+      renderCommandRules();
+      $("command-policy").hidden = false;
+    } catch (e) {
+      $("hint").textContent = "許可設定を読み込めませんでした: " + e.message;
+    } finally {
+      $("command-policy-open").disabled = state.busy || !state.workspace;
+    }
+  }
+
+  async function saveCommandPolicy() {
+    if (!state.workspace) return;
+    $("command-policy-save").disabled = true;
+    try {
+      const data = await (await post("/api/workspace/command-permissions", {
+        workspace: state.workspace, rules: state.commandRules,
+      })).json();
+      state.commandRules = data.rules;
+      $("command-policy").hidden = true;
+      $("hint").textContent = "この作業フォルダのターミナル許可設定を保存しました。";
+    } catch (e) {
+      $("hint").textContent = "許可設定を保存できませんでした: " + e.message;
+    } finally {
+      $("command-policy-save").disabled = false;
+    }
   }
 
   async function send(textOverride) {
@@ -474,7 +557,8 @@
     if (profile === "coder" && coderMode === "auto" &&
         !state.autoConfirmedWorkspaces.has(state.workspace)) {
       if (!window.confirm("オートモードの注意\n\nCoderは選択した作業フォルダ内のファイルを変更し、"
-          + "必要なコマンドを個別確認なしで実行します。作業内容は下の作業ログに表示されます。"
+          + "ターミナルの未登録コマンドは実行前に確認します。許可設定で登録したコマンドだけ、"
+          + "個別確認なしで実行できます。作業内容は下の作業ログに表示されます。"
           + "信頼できるプロジェクトだけを選んでください。変更を元に戻せない場合があります。\n\n"
           + "作業フォルダ: " + state.workspace + "\n\nこの作業フォルダで続行しますか？")) return;
       state.autoConfirmedWorkspaces.add(state.workspace);
@@ -654,6 +738,22 @@
   $("profile").addEventListener("change", updateProfile);
   $("coder-mode").addEventListener("change", () => updateProfile());
   $("workspace-select").addEventListener("click", selectWorkspace);
+  $("command-policy-open").addEventListener("click", openCommandPolicy);
+  $("command-policy-close").addEventListener("click", () => $("command-policy").hidden = true);
+  $("command-policy-add").addEventListener("click", () => {
+    const command = $("command-policy-input").value.trim();
+    if (!command) return;
+    if (state.commandRules.some((rule) => rule.command === command)) {
+      $("hint").textContent = "同じコマンドのルールがすでにあります。";
+      return;
+    }
+    state.commandRules.push({
+      command, action: $("command-policy-action").value,
+    });
+    $("command-policy-input").value = "";
+    renderCommandRules();
+  });
+  $("command-policy-save").addEventListener("click", saveCommandPolicy);
   $("interaction-submit").addEventListener("click", () =>
     replyInteraction($("interaction-answer").value.trim()));
   $("interaction-approve").addEventListener("click", () => replyInteraction("approved"));
