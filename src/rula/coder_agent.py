@@ -1,4 +1,6 @@
-"""Dedicated RulaCoder agent configuration for the shared local 9B engine."""
+"""Dedicated RulaCoder configuration and optional structured planning."""
+import os
+
 from .agent import Agent
 from .coder_workflow import CoderWorkflow
 from .tools import ToolRegistry
@@ -14,8 +16,6 @@ class CoderAgent(Agent):
         budget = workflow.budget
         self.tools = tools
         prompt = workflow.system_prompt(request_text)
-        self.config.extra_system = (
-            f"{prompt}\n\n{memory_context}" if memory_context else prompt)
         self.config.coder_auto = mode in ("generate", "auto")
         self.config.max_tool_calls = (
             budget["tool_calls"] if mode in ("generate", "auto")
@@ -25,6 +25,41 @@ class CoderAgent(Agent):
         self.config.temperature = 0.2
         self.config.stream = False
         self.config.preview = False
+        planner_context = ""
+        if mode in ("generate", "auto") and getattr(
+                self.engine, "backend", None) in {"tabbyapi", "exllamav2"}:
+            if getattr(self.engine, "backend", None) == "exllamav2":
+                self.engine.close()
+            progress = getattr(self, "on_progress", None)
+            if callable(progress):
+                progress("Llama Plannerで実装計画を作成しています")
+            from .coder_planner import create_coding_plan, format_coding_plan
+            from .engine import load_env_file
+            from .tabbyapi_backend import TabbyAPIEngine
+
+            load_env_file()
+            planner_model = (
+                os.environ.get("RULA_CODER_PLANNER_MODEL", "").strip()
+                or os.environ.get(
+                    "RULA_TABBYAPI_MODEL", "Llama-3.1-8B-Instruct-exl3"
+                ).strip()
+            )
+            planner = TabbyAPIEngine(
+                model=planner_model,
+                model_env="RULA_CODER_PLANNER_MODEL",
+                display_name="Llama 3.1 8B Planner",
+            )
+            try:
+                plan = create_coding_plan(planner, request_text, memory_context)
+            finally:
+                planner.close()
+            planner_context = format_coding_plan(plan)
+        sections = [prompt]
+        if planner_context:
+            sections.append(planner_context)
+        if memory_context:
+            sections.append(memory_context)
+        self.config.extra_system = "\n\n".join(sections)
         action_request = mode in ("generate", "auto") and CoderWorkflow.is_action_request(
             request_text)
         self.config.thinking = (

@@ -32,7 +32,7 @@ from pydantic import BaseModel
 
 from ..agent import Agent, AgentConfig, Turn
 from ..coder_agent import CoderAgent
-from ..engine import build_engine
+from ..engine import build_coder_engine, build_engine
 from ..memory import Memory
 from ..tools import default_registry
 from ..tools.coder import CoderTools
@@ -396,8 +396,11 @@ def _agent_for(chat: dict) -> Agent:
     agent = _agents.get(chat["id"])
     agent_type = CoderAgent if chat.get("profile") == "coder" else Agent
     if agent is None or type(agent) is not agent_type:
+        engine = (
+            STATE["engine"] if APP_MODE == "coder" else build_coder_engine()
+        ) if agent_type is CoderAgent else STATE["engine"]
         agent = agent_type(
-            STATE["engine"],
+            engine,
             AgentConfig(candid=True, stream=True, preview=True, use_imagegen=False,
                         max_new_tokens=1024, max_continuations=2),
             default_registry(), _memory)
@@ -636,8 +639,14 @@ async def chat(req: ChatIn, request: Request):
         chat_doc["coder_workspace"] = workspace
 
     def work():
-        eng = STATE["engine"]
-        agent = _agent_for(chat_doc)
+        try:
+            agent = _agent_for(chat_doc)
+        except Exception as e:
+            log.exception("could not initialize the selected model")
+            emit("error", text=f"{type(e).__name__}: {e}")
+            emit("end")
+            return
+        eng = agent.engine
         with GEN_LOCK:
             started = time.perf_counter()
             try:
@@ -802,9 +811,12 @@ async def chat(req: ChatIn, request: Request):
 @app.post("/api/stop")
 def stop(request: Request):
     _check(request)
-    eng = STATE["engine"]
-    if eng is not None:
-        eng.cancel = True
+    engines = {id(engine): engine for engine in (
+        STATE["engine"],
+        *(agent.engine for agent in _agents.values()),
+    ) if engine is not None}
+    for engine in engines.values():
+        engine.cancel = True
     with _interaction_lock:
         for pending in _pending_interactions.values():
             pending.response = (
@@ -831,7 +843,8 @@ def open_url(body: OpenIn, request: Request):
 # -- lifecycle --------------------------------------------------------------
 def _load_engine():
     try:
-        STATE["engine"] = build_engine()
+        engine_factory = build_coder_engine if APP_MODE == "coder" else build_engine
+        STATE["engine"] = engine_factory()
         STATE["status"] = "ready"
         log.info("ready: %s (%s)", STATE["engine"].display_name,
                  getattr(STATE["engine"], "backend", "transformers"))
@@ -842,9 +855,16 @@ def _load_engine():
 
 
 def _quit():
-    eng = STATE["engine"]
-    if eng is not None and hasattr(eng, "close"):
-        eng.close()
+    engines = {id(engine): engine for engine in (
+        STATE["engine"],
+        *(agent.engine for agent in _agents.values()),
+    ) if engine is not None}
+    for eng in engines.values():
+        if hasattr(eng, "close"):
+            eng.close()
+        shutdown = getattr(eng, "shutdown", None)
+        if callable(shutdown):
+            shutdown()
     try:
         os.remove(RUN_FILE)
     except OSError:

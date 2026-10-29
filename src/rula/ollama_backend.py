@@ -330,6 +330,10 @@ class OllamaEngine:
                 return
             time.sleep(0.3)
 
+    def close(self):
+        """Release this model when its owning app is closing."""
+        self.unload()
+
     def _resident(self) -> bool:
         try:
             running = _get("/api/ps").get("models", [])

@@ -273,6 +273,11 @@ class Agent:
         # model to load, and nothing evicted from the card to make room for one.
         if getattr(self.engine, "supports_vision", False):
             return self.engine.describe_image(ref, question)
+        if getattr(self.engine, "backend", None) == "strata":
+            raise RuntimeError(
+                "現在のStrataモデルは画像入力に対応していません。"
+                "画像対応モデルを vision on で起動してください。"
+            )
         return self.vision.describe(ref, question)
 
     @property

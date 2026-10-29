@@ -70,6 +70,41 @@ class GuiVersionTests(unittest.TestCase):
         self.assertIn("write_file", registry.names())
         self.assertIn("run_command", registry.names())
         self.assertTrue(agent.config.coder_auto)
+
+    def test_planner_runs_only_for_generate_and_auto_on_tabbyapi(self):
+        plan = {
+            "task_type": "feature",
+            "target_files": ["src/main.py"],
+            "requirements": ["Add feature"],
+            "context_summary": "Implement the requested feature.",
+            "validation": ["Run focused tests"],
+            "blocking_question": None,
+        }
+        planner = SimpleNamespace(close=lambda: None)
+        coder = SimpleNamespace(backend="tabbyapi", supports_thinking=False)
+        with patch("rula.engine.load_env_file"), patch(
+                "rula.tabbyapi_backend.TabbyAPIEngine", return_value=planner) as factory, \
+                patch("rula.coder_planner.create_coding_plan", return_value=plan) as create_plan:
+            agent = CoderAgent(coder, AgentConfig(), default_registry())
+            agent.configure_request(
+                "generate", "medium", default_registry(),
+                request_text="Add the feature",
+                memory_context="project note",
+            )
+
+        factory.assert_called_once()
+        create_plan.assert_called_once_with(planner, "Add the feature", "project note")
+        self.assertIn('"target_files": [', agent.config.extra_system)
+        self.assertIn("project note", agent.config.extra_system)
+
+    def test_planner_is_not_used_for_plan_or_chat_modes(self):
+        coder = SimpleNamespace(backend="tabbyapi", supports_thinking=False)
+        with patch("rula.tabbyapi_backend.TabbyAPIEngine") as factory:
+            for mode in ("plan", "chat"):
+                agent = CoderAgent(coder, AgentConfig(), default_registry())
+                agent.configure_request(mode, "medium", default_registry())
+
+        factory.assert_not_called()
     def test_coder_prompt_classifies_different_software_tasks(self):
         cases = {
             "login is broken; fix the error": "bugfix",
@@ -120,16 +155,34 @@ class GuiVersionTests(unittest.TestCase):
 
         self.assertTrue(agent.config.thinking)
 
-    def test_coder_profile_gets_separate_agent_with_shared_model_engine(self):
-        engine = SimpleNamespace(supports_thinking=True)
+    def test_coder_profile_gets_dedicated_coder_model_engine(self):
+        main_engine = SimpleNamespace(supports_thinking=True)
+        coder_engine = SimpleNamespace(supports_thinking=False, backend="ollama")
         chat = {"id": "test-coder-agent", "profile": "coder", "messages": []}
 
         with patch.dict(server._agents, {}, clear=True), patch.dict(
-                server.STATE, {"engine": engine}):
+                server.STATE, {"engine": main_engine}), patch.object(
+                    server, "build_coder_engine", return_value=coder_engine):
             agent = server._agent_for(chat)
 
         self.assertIsInstance(agent, CoderAgent)
-        self.assertIs(agent.engine, engine)
+        self.assertIs(agent.engine, coder_engine)
+
+    def test_coder_app_loads_only_its_dedicated_model(self):
+        coder_engine = SimpleNamespace(
+            display_name="Qwen2.5-Coder-7B-Instruct", backend="ollama")
+
+        with patch.object(server, "APP_MODE", "coder"), patch.dict(
+                server.STATE, {"engine": None, "status": "loading", "error": None}), \
+                patch.object(server, "build_coder_engine",
+                             return_value=coder_engine) as build_coder, \
+                patch.object(server, "build_engine") as build_main:
+            server._load_engine()
+
+            self.assertIs(server.STATE["engine"], coder_engine)
+            self.assertEqual(server.STATE["status"], "ready")
+            build_coder.assert_called_once_with()
+            build_main.assert_not_called()
 
     def test_stream_guard_recognizes_each_new_coder_tool(self):
         for name in ("find_files", "find_symbol", "read_files", "project_memory",

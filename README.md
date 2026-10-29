@@ -1,25 +1,25 @@
-# Rula — 自分のPCで動く日本語AIアシスタント
+# Rula — ExLlamaV3 / ExLlamaV2で動く日本語AIアシスタント
 
-Rula は、NVIDIA の GPU を積んだ Windows PC の中だけで動く、日本語の AI アシスタントです。
-チャットの画面で対話でき、会話の内容が外部の AI サービスに送られることはありません。
-必要なときは自分で Web 検索・計算・日付の計算をしてから答えます。画像も読めます。
+RulaはTabbyAPI上のExLlamaV3モデルをメイン推論に使う日本語AIアシスタントです。
+通常の会話、API、CLIはメインモデルへ、RulaCoderは専用のExLlamaV2 Coderモデルへ接続します。
+別PCの推論サーバーを設定した場合、会話内容はそのサーバーへ送信されます。
+必要に応じてWeb検索・計算・日付計算を行います。
 
 > [!WARNING]
-> **無検閲 (uncensored) モデルを使っています。** 会話モデルは、安全のための調整を緩めた
-> HauhauCS/Qwen3.5-9B-Uncensored です。拒否のルールはプロンプトで与えているだけで、
-> モデルの重みには含まれていません。プロンプトを書き換えれば外せます。詳しくは [NOTICE](NOTICE)。
+> モデルの安全性・ライセンス・拒否傾向は推論サーバーではなく、起動したモデルに依存します。
+> 利用するモデルの配布元・ライセンス・安全設定を確認してください。
 
-## かんたん導入 (Windows + NVIDIA GPU)
+## かんたん導入 (Windows)
 
 | 必要なもの | |
 |---|---|
 | OS | Windows 10 / 11 (64bit) |
-| GPU | NVIDIA、VRAM 8GB 以上 (6〜8GB なら軽い 4B モデルを自動で選びます) |
-| ドライバー | 551.61 以降 |
-| ディスク | 空き約 14GB (導入後は約 8GB) |
-| 回線 | 初回に約 7GB をダウンロードします |
+| 推論エンジン | Main: TabbyAPI + ExLlamaV3 / Coder: ExLlamaV2 (別途導入) |
+| GPU/RAM/ディスク | モデルとコンテキスト長に応じたGPUメモリが必要 |
+| モデル | Llama 3.1 8B Instruct EXL3 4.0bpw と Qwen2.5-Coder-7B-Instruct EXL2 4.0bpw |
 
-Python などを先に入れておく必要はありません(Rula 専用のものをフォルダの中に用意します)。
+Rula専用のPython環境はセットアップで用意します。TabbyAPI、モデル、Coder用wheelは別途導入してください。
+Ollamaは `RULA_CODER_BACKEND=ollama` を明示的に使う場合のみ必要です。
 
 ### いちばん簡単な方法: 1行で導入
 
@@ -29,13 +29,13 @@ Python などを先に入れておく必要はありません(Rula 専用のも�
 iwr -useb https://raw.githubusercontent.com/irxk/RulaAI/main/setup.ps1 | iex
 ```
 
-表示を確認して Enter を押すと、準備が進みます(回線により 10〜40 分)。終わると
-**デスクトップに `Rula.exe` と `RulaCoder.exe`** ができて Rula が開きます。
+Rula本体の準備が進みます。推論モデルや推論エンジンの取得は行いません。
+終わると **デスクトップに `Rula.exe` と `RulaCoder.exe`** ができます。
 通常の会話は `Rula.exe`、Coder専用の作業は `RulaCoder.exe` を起動します。
 
 - 入る場所は `%LOCALAPPDATA%\Programs\Rula` です。別のドライブに入れるときは、先に
   場所を指定します: `$env:RULA_HOME = "D:\Rula"; iwr -useb https://raw.githubusercontent.com/irxk/RulaAI/main/setup.ps1 | iex`
-- **同じ1行で最新版に更新できます。** モデルなど取得済みのものはそのまま使います。
+- **同じ1行で最新版に更新できます。** RulaのPython環境はそのまま使います。
 - exe は署名がないため、ウイルス対策ソフトによって止められることがあります。
   そうなった場合はセットアップが自動で気づき、ショートカットに切り替えます。
 - PC の設定は変えません。実行ポリシーも、セットアップを動かす PowerShell の中でだけ許可します。
@@ -45,12 +45,11 @@ iwr -useb https://raw.githubusercontent.com/irxk/RulaAI/main/setup.ps1 | iex
 1. このページ上の **Code → Download ZIP** でダウンロードし、好きな場所に展開します。
 2. 展開したフォルダの **`Rula-Setup.cmd`** をダブルクリックします。
    「Windows によって PC が保護されました」と出たら、「詳細情報」→「実行」を押します。
-3. 表示を確認して Enter を押すと、ダウンロードと準備が進みます(回線により 10〜40 分)。
-4. 終わると Rula が開きます。次からは「Rula」または「RulaCoder」で起動します。
+3. 表示を確認して Enter を押すと、Rula本体の準備が進みます。
+4. Rulaフォルダの `start-tabbyapi.bat` でTabbyAPIを起動してから「Rula」または「RulaCoder」を起動します。
 
-途中で止まっても、もう一度 `Rula-Setup.cmd` を実行すれば、取得済みのファイルはそのまま続きから再開します。
-取得するファイルはすべて配布元 (python.org、PyPI、llama.cpp の GitHub、HuggingFace) のもので、
-決められた SHA256 と一致しなければ使いません。
+途中で止まっても、もう一度 `Rula-Setup.cmd` を実行すれば、取得済みのRula用ファイルはそのまま続きから再開します。
+Rula用PythonとPyPIパッケージは配布元のSHA256/固定バージョンを検証します。
 
 ### 使い方
 
@@ -60,13 +59,10 @@ iwr -useb https://raw.githubusercontent.com/irxk/RulaAI/main/setup.ps1 | iex
 - 英語で聞けば英語で答えます。
 - ウィンドウ右下にバージョンを表示します。アプリの更新ごとに `0.01` ずつ増えます。
 
-### 起動を速くする(任意)
+### TabbyAPIの接続を確認する(任意)
 
-通常は、ウィンドウを閉じるとモデルも VRAM から降り、次回の起動でまた読み込みます
-(9B で約10〜15秒)。何度も開き直すなら、Rula のフォルダで `warm.ps1` を実行して
-ウィンドウを開いたままにしておくと、モデルが常駐して**起動が毎回一瞬**になります。
-そのあいだ VRAM を約6GB 使い続けます。`warm.ps1` のウィンドウで Ctrl+C(または閉じる)
-と解放されます。
+TabbyAPIがモデルをロードし、Rulaを閉じるとRulaがTabbyAPIへモデル解放を依頼します。
+接続状態はRulaのフォルダで `warm.ps1` を実行して確認できます。
 
 ### アンインストール
 
@@ -79,9 +75,9 @@ Rula のフォルダ(1行で導入した場合は `%LOCALAPPDATA%\Programs\Rula`
 
 | 症状 | 対処 |
 |---|---|
-| 「NVIDIA の GPU とドライバーが見つかりません」 | NVIDIA の GPU が必要です。ドライバーを入れてください |
-| 「ドライバーが古い」 | NVIDIA App か nvidia.com からドライバーを更新してください |
-| 返事がとても遅い | 他の GPU を使うアプリ(ゲーム、動画編集など)を閉じてください。VRAM が足りないと極端に遅くなります |
+| TabbyAPIに接続できない | TabbyAPIが起動しているか、URLと `.env` のAPIキーを確認してください |
+| モデルをロードできない | `config.yml` のモデル名と `models` フォルダ、GPUメモリを確認してください |
+| 返事がとても遅い | TabbyAPIのログ、GPUメモリ、量子化、コンテキスト長を確認してください |
 | ダウンロードが止まる | もう一度 `Rula-Setup.cmd` を実行すると続きから再開します |
 | ウイルス対策ソフトに止められる | `Rula-Setup.cmd` はダウンロードと準備だけを行うスクリプトです。中身はテキストで確認できます |
 
@@ -91,8 +87,9 @@ Rula のフォルダ(1行で導入した場合は `%LOCALAPPDATA%\Programs\Rula`
 
 ## HTTP API として使う
 
-自分のPCで動く日本語アシスタントを、固定URLのHTTP APIとして公開します。
-会話の内容が外部のAIサービスに送られることはありません。
+TabbyAPI上のモデルを使う日本語アシスタントを、固定URLのHTTP APIとして公開します。
+API呼び出しの会話内容は設定された推論サーバーへ送信されます。外部サーバーを設定する場合、
+APIキーとHTTPSを使用してください。
 
 ```bash
 curl -X POST https://api.example.com/v1/chat \
@@ -115,41 +112,73 @@ curl -X POST https://api.example.com/v1/chat \
 ### 1. 依存関係とモデル
 
 ```powershell
-pip install -r requirements.txt   # 約50MB
-.\setup_llama.ps1                 # 9B: 約7.0GB・初回のみ(4B なら -Model 4b で約3.4GB)
+.\install.ps1                     # Rula本体とPython環境。推論モデルは取得しません
 ```
 
-推論は llama.cpp の `llama-server` が行います。API が起動時に自動で立ち上げ、
-API が止まると(強制終了でも)一緒に終了します。PyTorch は不要です。
+Main RulaはTabbyAPI + ExLlamaV3でLlama 3.1 8B Instructを実行します。
+Coder専用アプリは専用のExLlamaV2サーバーでQwen2.5-Coder-7B-Instruct EXL2モデルを使います。
+各推論エンジンとモデルはRulaとは別に用意してください。
 
-`setup_llama.ps1` が取得するもの(すべて配布元の SHA256 と照合します):
+#### TabbyAPI / ExLlamaV3 (Main Rula)
 
-| ファイル | 9B | 4B | 用途 |
-|---|---|---|---|
-| llama.cpp b11172 (CUDA 12.4 版) | 616MB | 616MB | 推論エンジン |
-| 会話モデル Qwen3.5 無検閲版 Q4_K_M | 5.4GB | 2.6GB | 本体 |
-| mmproj | 879MB | 644MB | 画像を会話モデル自身で読む(`-NoVision` で省略) |
-| MTP 層 | 160MB | 77MB | 生成を速くする(`-NoMtp` で省略) |
-| **ディスク使用量の合計** | **約13GB** | **約7.4GB** | MTP 付きモデルは本体の複製に層を足したもの |
+TabbyAPIの[公式インストール手順](https://github.com/theroyallab/tabbyAPI/blob/main/docs/01.-Getting-Started.md)に従い、
+Windows版を導入して `start.bat` を一度実行します。NVIDIA GPUではCUDA 12.xを選びます。
+既定の場所を使う場合は次のとおりです。
 
-RTX 4060 (8GB) での実測(MTP あり):
+```powershell
+Set-Location "$env:LOCALAPPDATA\Programs"
+git clone https://github.com/theroyallab/tabbyAPI.git TabbyAPI
+Set-Location .\TabbyAPI
+.\start.bat
+```
 
-| | 9B(既定) | 4B |
-|---|---|---|
-| VRAM | 約6.0GB | 約3.6GB |
-| 生成速度 | 約61〜63 tok/s (MTP 無し 42) | 約87〜105 tok/s (MTP 無し 65〜70) |
-| 検索ありの質問 1問あたり | 約6.9秒 | 約5.8秒 |
-| 検索なしの知識・推論 10問 | 7問正解 | 4問正解 |
-| 画像1枚の読み取り | 約9秒 | 約6秒 |
+依存関係が入り、APIが起動したら一度終了し、TabbyAPIフォルダで次を実行してEXL3モデルを取得します。
 
-9B は 8GB のカードでは余裕が 600MB ほどしかありません。ほかのアプリが GPU を
-多く使うと、モデルの一部がメインメモリにはみ出して生成が極端に遅くなります
-(エラーにはなりません)。その場合は GPU を使うアプリを閉じるか、`.env` で
-`RULA_MTP_DRAFT=1`(VRAM -210MB)/ `RULA_MTP=0`(-490MB)にするか、4B に切り替えてください。
+```powershell
+.\start.bat download turboderp/Llama-3.1-8B-Instruct-exl3 --revision 4.0bpw
+Copy-Item "$env:LOCALAPPDATA\Programs\Rula\tabbyapi-config.yml" .\config.yml
+```
 
-Ollama でも動きます(`RULA_BACKEND=ollama`)。その場合、画像は別の画像モデル
-(Qwen2-VL-2B)で読むため `pip install -r requirements-torch.txt`(約4.8GB)が必要で、
-画像のたびに会話モデルを VRAM から降ろします。設定項目は `.env.example` を参照してください。
+取得量は約4.95GBです。Rulaの `tabbyapi-config.yml` をTabbyAPIフォルダの `config.yml` にコピーすると、
+`127.0.0.1:5000` のみで待ち受け、認証を有効にしたまま、モデルを8Kコンテキスト・Q4 KV cacheでロードします。
+初回起動時、TabbyAPIは `api_tokens.yml` を作り、一般APIキーとadminキーを表示します。
+`%LOCALAPPDATA%\Programs\Rula\.env` に一般キーを `RULA_TABBYAPI_API_KEY`、
+adminキーを `RULA_TABBYAPI_ADMIN_KEY` として設定してください。
+adminキーはRulaがモデルをロード/解放するために使います。外部へ公開せず、このPC内でのみ利用してください。
+以後の起動にはRulaフォルダの `start-tabbyapi.bat` を使ってください。
+日本語Windowsの既定コンソール文字コードでログ出力が失敗し、Rula終了後のモデル再ロードが止まるのを防ぐため、
+この起動ファイルはTabbyAPIのPython出力をUTF-8に設定します。TabbyAPIを別の場所に入れた場合は
+`TABBYAPI_HOME` にそのフォルダを設定してください。
+
+Rulaを開くと必要なモデルをロードし、Rulaを閉じるとモデルを解放します。これにより、8GB VRAMのGPUで
+Main RulaとCoderを順番に使えます。TabbyAPIの公式情報は[リポジトリ](https://github.com/theroyallab/tabbyAPI)と
+[公式モデルページ](https://huggingface.co/turboderp/Llama-3.1-8B-Instruct-exl3/tree/4.0bpw)を参照してください。
+
+#### ExLlamaV2 (RulaCoder)
+
+Coder用モデルは、取得済みの `Qwen2.5-Coder-7B-Instruct-4.0bpw-exl2` を使います。
+モデルの変換・ビルドは不要です。TabbyAPIのPython環境に、PyTorch/CUDA/Pythonの組み合わせに一致する
+ExLlamaV2公式のビルド済みwheelを導入します。公式リリースのSHA-256を検証し、CUDA ToolkitやVisual Studioの
+コンパイラはインストールしません。
+ExLlamaV2本体は公式アーカイブ済みのため、wheelはv0.3.2に固定しています。PyTorchやCUDAを更新する場合は、
+その組み合わせに一致する公式wheelがあることを先に確認してください。
+
+```powershell
+.\install-coder-v2.ps1
+```
+
+既定ではモデルを `%LOCALAPPDATA%\Programs\TabbyAPI\models\Qwen2.5-Coder-7B-Instruct-4.0bpw-exl2` に配置し、
+設定で `RULA_CODER_V2_MODEL_DIR` を指定します。必要な場合のみ `.env` に次を設定してください。
+
+```ini
+RULA_CODER_BACKEND=exllamav2
+RULA_CODER_V2_MODEL=Qwen2.5-Coder-7B-Instruct-4.0bpw-exl2
+RULA_CODER_V2_MAX_SEQ_LEN=8192
+```
+
+RulaCoder起動時にローカル専用のV2サーバーが自動起動し、終了時に停止します。Generate/Autoモードでは
+Main用Llama 3.1 8B PlannerをTabbyAPIで先に実行し、モデルを解放してからCoderをロードします。
+VRAM節約のため、RulaとRulaCoderを同時に起動しないでください。
 
 ### 2. APIキーを発行
 
@@ -200,10 +229,11 @@ Cloudflareに登録済みの独自ドメインが必要です。
 ```
 
 **Rula.exe** は統合アシスタント、**RulaCoder.exe** はCoder専用アプリです。
-両者は同じ9BモデルとGPUを使うため、同時には起動しません。片方の起動中にもう片方を開くと、
+MainはTabbyAPI/ExLlamaV3、Coderは専用のExLlamaV2サーバーを使います。GPUメモリを節約するため、片方の起動中にもう片方を開くと、
 確認画面が表示され、「はい」で起動中のアプリを終了して切り替え、「いいえ」で現在のアプリを使い続けます。
 Coder専用アプリでは会話履歴とログを `%APPDATA%\RulaCoder` に分けて保存します。
-API の起動もコマンドも要りません。ウィンドウを閉じるとアプリも止まり、VRAM が空きます。
+ExLlamaV2サーバーはCoder起動時に自動で開始し、終了時に停止します。Generate/AutoモードではPlannerがMain用TabbyAPIを使うため、TabbyAPIも起動してください。
+Main Rulaを閉じるとTabbyAPIモデル、RulaCoderを閉じるとExLlamaV2モデルが解放されます。
 
 | 画面 | できること |
 |---|---|
@@ -213,7 +243,7 @@ API の起動もコマンドも要りません。ウィンドウを閉じると�
 | 📎 | 画像を添付。ドラッグ＆ドロップや貼り付け (Ctrl+V) でも渡せます |
 | 考える | ON にすると考えてから答えます (正確になるが遅い) |
 | ■ | 生成を途中で止めます |
-| モデルプロファイル | Rulaでは総合・超高速・高性能を切り替えます。同じ9B重みを使います |
+| モデルプロファイル | Rulaでは総合・超高速・高性能を切り替えます。同じメインモデルを使います |
 
 RulaCoderでは作業フォルダを選んでから計画・AIアシスタント・コード生成AI・オートを選べます。
 計画は調査と計画のみ、AIアシスタントは読み取りと説明・提案のみ、コード生成AIはファイルを編集して
@@ -226,15 +256,15 @@ RulaCoderでは作業フォルダを選んでから計画・AIアシスタント
 要件が不明で作業を決められない場合はCoderが質問ダイアログを表示します。Coder性能は小・中・大から選択できます。
 Rulaは依頼の条件を捉え、必要な根拠を確かめ、回答前に矛盾を点検します。Coderは依頼・調査・実装と検証・結果報告の
 4段階で進み、同じ計画や調査の反復を避けます。
-RulaCoderはRulaの会話Agentとは別の専用Agent・作業ポリシーで動き、9Bの重みは共有します。
+RulaCoderはRulaの会話Agentとは別の専用Agent・作業ポリシーで動き、Coder専用モデルを使います。
 ファイル変更後の完了判定には差分レビューに加え、実際のテスト・ビルド・静的検査が必要です。
 `echo` など無関係なコマンドが成功しただけでは検証済みになりません。
 依頼を不具合修正・機能追加・テスト・ドキュメント・リファクタ・サイト作成に分類し、
 プロジェクトのマニフェストやテスト設定から検証候補を提示して、既存の開発手順に合わせます。
 明示的な論理パズルや複数条件の問題では、対応モデルに限り、長さを制限した思考を自動で使います。
 単純な質問やコーディング依頼はこの追加処理の対象外です。
-大は対応バックエンドでネイティブ思考を使い、思考を最大2,000字に制限して回答・ツール呼び出しの
-予算を残しつつ、調査回数・回答長も増やします。モデル自体は同じ9Bです。
+大は対応モデルの思考機能を使い、思考を最大2,000字に制限して回答・ツール呼び出しの
+予算を残しつつ、調査回数・回答長も増やします。
 ただしオートモードの実装依頼では、コードを思考欄に出してファイル操作を逃さないよう、
 ネイティブ思考を切り、ファイル編集ツールの実行を優先します。
 RulaCoderはプロジェクト指示・ソース内検索・行番号付き読み込み・複数ファイルのパッチ適用に対応し、
@@ -242,6 +272,29 @@ RulaCoderはプロジェクト指示・ソース内検索・行番号付き読�
 ファイル保存ツールが失敗した場合はログに「失敗」と表示し、オートモードでは失敗を実装済みと誤認せず、
 コードを回答に貼るだけで完了扱いにしません。
 「変更なし」は実際のファイル変更として数えず、同じコードが回答に出るだけのケースも完了扱いにしません。
+
+Main Rulaの既定はTabbyAPIです。`.env` で `RULA_TABBYAPI_BASE_URL`、
+`RULA_TABBYAPI_MODEL`、`RULA_TABBYAPI_API_KEY` と `RULA_TABBYAPI_ADMIN_KEY` を設定します。
+adminキーはMain Rulaの起動時にモデルをロードし、終了時に解放するために使います。
+別の推論先を使う場合は `RULA_MAIN_BACKEND=ollama` または `strata` を設定します。
+Ollamaでは `RULA_MAIN_OLLAMA_MODEL`、`RULA_MAIN_NUM_CTX` と `RULA_MAIN_KEEP_ALIVE` を設定できます。
+
+RulaCoderはExLlamaV2のQwen2.5-Coder-7B-Instruct EXL2 4.0bpwを既定で使います。
+Generate/AutoモードではLlama 3.1 8B Plannerが構造化JSON計画を作成し、ロードを解放した後に
+Coderモデルが作業します。Plan/ChatモードはPlannerを呼び出しません。Planner出力は助言として扱い、
+実際のファイル配置はCoderのプロジェクト調査で確認します。
+Coder用モデルは自動取得されません。[取得済みの既成EXL2モデル](https://huggingface.co/DrNicefellow/Qwen2.5-Coder-7B-Instruct-4.0bpw-exl2/tree/1e06f08279089a5e80eef550d93a7909b12cf731)をTabbyAPIの `models` 以下へ配置してください。
+`install-coder-v2.ps1` が対応する公式V2 wheelをSHA-256検証して導入します。`.env` では
+`RULA_CODER_BACKEND=exllamav2`、`RULA_CODER_V2_MODEL_DIR`、`RULA_CODER_V2_MAX_SEQ_LEN`、
+`RULA_CODER_PLANNER_MODEL` を設定できます。V3のCoderを使う場合は
+`RULA_CODER_BACKEND=tabbyapi` と `RULA_CODER_TABBYAPI_MODEL` を設定してください。
+Ollamaは `RULA_CODER_BACKEND=ollama` とし、`RULA_CODER_OLLAMA_MODEL` 等を設定すれば明示的に選べます。
+Ollama/StrataをCoderに指定した場合は、TabbyAPIの構造化Plannerは使用せず、既存の単一モデル動作になります。
+RulaCoder専用アプリはCoderモデルだけから起動し、Planner実行時のみLlamaを順番にロードします。
+
+VRAM/RAMが限られるPCではモデルを同時に使わず、順番に使ってください。
+TabbyAPIのモデルロード/解放には `RULA_TABBYAPI_ADMIN_KEY` を設定します。
+RulaとRulaCoderを同時に起動しないでください。PlannerとCoderのモデルは順番にロードされます。
 会話がモデルのコンテキスト上限を超えた場合は古い履歴を省いて再試行し、今回の依頼や実行中のツール結果は保持します。
 圧縮した過去ターンの全文は会話データとして保持し、現在の質問に関連する抜粋を必要時に再参照します。
 これはモデル自体のコンテキスト長を増やすものではなく、長期会話を検索・要約で扱う仕組みです。
@@ -300,8 +353,7 @@ python -m src.rula --candid --stream # 検索結果を使う長い回答を、�
 | `/reset` | 会話をリセット(記憶は残る) |
 | `/help` `/exit` | コマンド一覧 / 終了 |
 
-API が起動中なら、CLI は API が立てた llama-server をそのまま使います(VRAM は
-増えません)。生成は1件ずつなので、同時に使うと互いに待ち合わせになります。
+CLIもGUI/APIと同じMainモデルを使います。生成は1件ずつなので、同時に使うと互いに待ち合わせになります。
 
 ## なぜポート開放が要らないのか
 
@@ -323,7 +375,7 @@ client = OpenAI(
 )
 
 r = client.chat.completions.create(
-    model="rula-1.2-4b",
+    model="your-strata-model-id",
     messages=[{"role": "user", "content": "日本で2番目に高い山は?"}],
 )
 print(r.choices[0].message.content)
@@ -585,13 +637,8 @@ r = client.chat.completions.create(
 画像内の日本語も読み取れます(OCR)。テキストを省略した場合は「この画像について
 説明してください」として扱います。
 
-> **画像は会話モデル自身が読みます**(llama-server + mmproj)。別のモデルへの
-> 入れ替えは無く、VRAM も増えません。画像付きの応答は 9B で約9〜12秒です。
-> 実測: 日本語のレシート画像から店名・合計金額・住所を正しく読み取りました。
->
-> Ollama で動かしている場合(`RULA_BACKEND=ollama`)は従来どおり別の画像モデルを
-> 使うため、会話モデルを一旦降ろし、空きが6GBを下回ると「GPUの空きが不足して
-> います」というエラーを返します。
+> Llama 3.1 8Bはテキストモデルです。画像を使う場合、Rulaは別のローカルvisionモデルへフォールバックします。
+> Strataを画像対応モデルで使う場合に限り、`RULA_STRATA_VISION=1` を設定してください。
 
 > 会話の履歴はサーバー側で保持します。同じ会話を続けるには `user` に同じ値を
 > 渡してください。省略した場合は、送信されたメッセージ列の最初の発言から
@@ -1011,14 +1058,11 @@ DISCORD_TOKEN=<Botトークン>
 ## 必要環境
 
 - Python 3.10以上
-- NVIDIA GPU(VRAM 8GB以上)
-- 空きディスク 約4GB
+- 起動済みTabbyAPIと対応モデル
+- GPU/RAM/空きディスクはモデルとコンテキスト長の要件を満たすこと
 - Cloudflareに登録済みの独自ドメイン(固定URLの場合)
-
-GPUが無くてもCPUで起動しますが、1回の応答に数分かかるため実用的ではありません。
 
 ## ライセンス
 
-コードは MIT License です。モデルの重みは同梱しておらず、実行時に取得されます。
-重みは Qwen3-4B-Instruct-2507 (Apache License 2.0) に由来します。
-詳細は `models/Rula1.1-4b/NOTICE`(セットアップ後に生成)を参照してください。
+コードは MIT License です。モデルの重みは同梱しません。
+TabbyAPIは別ライセンス (AGPL-3.0) のソフトウェアです。モデルのライセンスと配布条件も個別に確認してください。
