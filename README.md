@@ -177,7 +177,7 @@ RULA_CODER_V2_MAX_SEQ_LEN=8192
 ```
 
 RulaCoder起動時にローカル専用のV2サーバーが自動起動し、終了時に停止します。Generate/Autoモードでは
-Main用Llama 3.1 8B PlannerをTabbyAPIで先に実行し、モデルを解放してからCoderをロードします。
+Qwen3.5 9B EXL3 PlannerをTabbyAPIで先に実行し、モデルを解放してからCoderをロードします。
 VRAM節約のため、RulaとRulaCoderを同時に起動しないでください。
 
 ### 2. APIキーを発行
@@ -282,17 +282,18 @@ adminキーはMain Rulaの起動時にモデルをロードし、終了時に解
 Ollamaでは `RULA_MAIN_OLLAMA_MODEL`、`RULA_MAIN_NUM_CTX` と `RULA_MAIN_KEEP_ALIVE` を設定できます。
 
 RulaCoderはExLlamaV2のQwen2.5-Coder-7B-Instruct EXL2 4.0bpwを既定で使います。
-Generate/AutoモードではLlama 3.1 8B Plannerが構造化JSON計画を作成し、ロードを解放した後に
+Generate/AutoモードではQwen3.5 9B EXL3 Plannerが構造化JSON計画を作成し、ロードを解放した後に
 Coderモデルが作業します。Plan/ChatモードはPlannerを呼び出しません。Planner出力は助言として扱い、
 実際のファイル配置はCoderのプロジェクト調査で確認します。
 Coder用モデルは自動取得されません。[取得済みの既成EXL2モデル](https://huggingface.co/DrNicefellow/Qwen2.5-Coder-7B-Instruct-4.0bpw-exl2/tree/1e06f08279089a5e80eef550d93a7909b12cf731)をTabbyAPIの `models` 以下へ配置してください。
 `install-coder-v2.ps1` が対応する公式V2 wheelをSHA-256検証して導入します。`.env` では
 `RULA_CODER_BACKEND=exllamav2`、`RULA_CODER_V2_MODEL_DIR`、`RULA_CODER_V2_MAX_SEQ_LEN`、
-`RULA_CODER_PLANNER_MODEL` を設定できます。V3のCoderを使う場合は
+`RULA_CODER_PLANNER_MODEL` (既定: `Qwen3.5-9B-EXL3-2.5bpw`) を設定できます。
+V3のCoderを使う場合は
 `RULA_CODER_BACKEND=tabbyapi` と `RULA_CODER_TABBYAPI_MODEL` を設定してください。
 Ollamaは `RULA_CODER_BACKEND=ollama` とし、`RULA_CODER_OLLAMA_MODEL` 等を設定すれば明示的に選べます。
 Ollama/StrataをCoderに指定した場合は、TabbyAPIの構造化Plannerは使用せず、既存の単一モデル動作になります。
-RulaCoder専用アプリはCoderモデルだけから起動し、Planner実行時のみLlamaを順番にロードします。
+RulaCoder専用アプリはCoderモデルだけから起動し、Planner実行時のみQwen3.5を順番にロードします。
 
 VRAM/RAMが限られるPCではモデルを同時に使わず、順番に使ってください。
 TabbyAPIのモデルロード/解放には `RULA_TABBYAPI_ADMIN_KEY` を設定します。

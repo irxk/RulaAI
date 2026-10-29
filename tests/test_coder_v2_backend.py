@@ -107,7 +107,7 @@ class ExLlamaV2BackendTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "このPC内"):
                 ExLlamaV2Engine()
 
-    def test_auto_planner_unloads_v2_model_before_loading_main_model(self):
+    def test_auto_planner_uses_explicit_model_override_and_unloads_in_order(self):
         events = []
         plan = {
             "task_type": "feature",
@@ -131,12 +131,13 @@ class ExLlamaV2BackendTests(unittest.TestCase):
             def close():
                 events.append("planner_unloaded")
 
+        planner_factory = Mock(return_value=FakePlanner())
         with patch("rula.engine.load_env_file"), patch.dict(
                 os.environ, {
                     "RULA_CODER_PLANNER_MODEL": "Llama-3.1-8B-Instruct-exl3",
-                }), patch(
+                }, clear=True), patch(
                 "rula.tabbyapi_backend.TabbyAPIEngine",
-                return_value=FakePlanner()), patch(
+                planner_factory), patch(
                 "rula.coder_planner.create_coding_plan",
                 side_effect=lambda *args: events.append("plan_created") or plan):
             agent = CoderAgent(FakeEngine())
@@ -147,6 +148,52 @@ class ExLlamaV2BackendTests(unittest.TestCase):
         self.assertEqual(
             events,
             ["coder_unloaded", "plan_created", "planner_unloaded"],
+        )
+        self.assertEqual(
+            planner_factory.call_args.kwargs["model"],
+            "Llama-3.1-8B-Instruct-exl3",
+        )
+
+    def test_auto_planner_defaults_to_qwen35_independently_of_main_model(self):
+        events = []
+        plan = {
+            "task_type": "feature",
+            "target_files": ["src/main.py"],
+            "requirements": ["Implement the feature"],
+            "context_summary": "Implement the requested capability.",
+            "validation": ["Run relevant tests"],
+            "blocking_question": None,
+        }
+
+        class FakeEngine:
+            backend = "tabbyapi"
+            supports_thinking = False
+
+        class FakePlanner:
+            @staticmethod
+            def close():
+                events.append("planner_unloaded")
+
+        planner_factory = Mock(return_value=FakePlanner())
+        with patch("rula.engine.load_env_file"), patch.dict(
+                os.environ, {}, clear=True), patch(
+                "rula.tabbyapi_backend.TabbyAPIEngine",
+                planner_factory), patch(
+                "rula.coder_planner.create_coding_plan",
+                side_effect=lambda *args: events.append("plan_created") or plan):
+            agent = CoderAgent(FakeEngine())
+            agent.configure_request(
+                "auto", "small", Mock(), request_text="実装して"
+            )
+
+        self.assertEqual(
+            events,
+            ["plan_created", "planner_unloaded"],
+        )
+        planner_factory.assert_called_once_with(
+            model="Qwen3.5-9B-EXL3-2.5bpw",
+            model_env="RULA_CODER_PLANNER_MODEL",
+            display_name="Qwen3.5 9B Planner",
         )
 
 

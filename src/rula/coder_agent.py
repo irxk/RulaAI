@@ -5,6 +5,8 @@ from .agent import Agent
 from .coder_workflow import CoderWorkflow
 from .tools import ToolRegistry
 
+_DEFAULT_CODER_PLANNER_MODEL = "Qwen3.5-9B-EXL3-2.5bpw"
+
 
 class CoderAgent(Agent):
     """Keep coding policy and request budgets separate from Rula's chat agent."""
@@ -32,7 +34,7 @@ class CoderAgent(Agent):
                 self.engine.close()
             progress = getattr(self, "on_progress", None)
             if callable(progress):
-                progress("Llama Plannerで実装計画を作成しています")
+                progress("Qwen3.5 Plannerで実装計画を作成しています")
             from .coder_planner import create_coding_plan, format_coding_plan
             from .engine import load_env_file
             from .tabbyapi_backend import TabbyAPIEngine
@@ -40,14 +42,12 @@ class CoderAgent(Agent):
             load_env_file()
             planner_model = (
                 os.environ.get("RULA_CODER_PLANNER_MODEL", "").strip()
-                or os.environ.get(
-                    "RULA_TABBYAPI_MODEL", "Llama-3.1-8B-Instruct-exl3"
-                ).strip()
+                or _DEFAULT_CODER_PLANNER_MODEL
             )
             planner = TabbyAPIEngine(
                 model=planner_model,
                 model_env="RULA_CODER_PLANNER_MODEL",
-                display_name="Llama 3.1 8B Planner",
+                display_name="Qwen3.5 9B Planner",
             )
             try:
                 plan = create_coding_plan(planner, request_text, memory_context)
