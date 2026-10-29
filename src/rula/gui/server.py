@@ -918,6 +918,7 @@ def _setup(port: int, token: str):
                     k, v = line.split("=", 1)
                     os.environ.setdefault(k.strip(), v.strip().strip("\"'"))
 
+    os.environ["RULA_APP_MODE"] = APP_MODE
     STATE["token"], STATE["port"] = token, port
     _memory = Memory(os.path.join(DATA, "memory.json"))
     threading.Thread(target=_load_engine, daemon=True).start()

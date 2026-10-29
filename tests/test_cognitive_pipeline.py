@@ -29,6 +29,33 @@ class ThinkingCaptureEngine:
 
 
 class CognitivePipelinePromptTests(unittest.TestCase):
+    def test_safety_boundaries_are_central_and_follow_caller_context(self):
+        context = "呼び出し元の追加コンテキスト"
+        prompt = build_system_prompt(candid=True, extra=context)
+
+        self.assertLess(prompt.index(context), prompt.index("安全上の境界:"))
+        self.assertIn("率直モードは話し方の設定", prompt)
+        self.assertIn("実行可能な製造・使用手順を提供しない", prompt)
+        self.assertNotIn("常に回答します", prompt)
+        self.assertNotIn("年齢・相手などを確認して", prompt)
+
+    def test_candid_refusal_retry_reassesses_without_forcing_agreement(self):
+        agent = Agent(
+            engine=ThinkingCaptureEngine(),
+            config=AgentConfig(candid=True, use_tools=False, use_vision=False),
+        )
+        with patch.object(agent, "_generate", return_value="直接の回答") as generate:
+            answer = agent._retry_if_declined(
+                "申し訳ありませんが、お手伝いできません。",
+                [{"role": "user", "content": "依頼"}],
+            )
+
+        self.assertEqual(answer, "直接の回答")
+        args, kwargs = generate.call_args
+        self.assertNotIn("prefill", kwargs)
+        self.assertIn("安全な範囲で答えられる依頼", args[0][-1]["content"])
+        self.assertIn("拒否を維持", args[0][-1]["content"])
+
     def test_cli_image_generation_is_opt_in_and_missing_build_fails_clearly(self):
         self.assertFalse(AgentConfig().use_imagegen)
 
