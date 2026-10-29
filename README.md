@@ -18,7 +18,8 @@ RulaはTabbyAPI上のExLlamaV3モデルをメイン推論に使う日本語AIア
 | GPU/RAM/ディスク | モデルとコンテキスト長に応じたGPUメモリが必要 |
 | モデル | Llama 3.1 8B Instruct EXL3 4.0bpw と Qwen2.5-Coder-7B-Instruct EXL2 4.0bpw |
 
-Rula専用のPython環境はセットアップで用意します。TabbyAPI、モデル、Coder用wheelは別途導入してください。
+Rula専用のPython環境はセットアップで用意します。TabbyAPIとモデルは別途導入してください。
+TabbyAPIがセットアップ済みなら、RulaのセットアップがCoder用wheelも確認・導入します。
 Ollamaは `RULA_CODER_BACKEND=ollama` を明示的に使う場合のみ必要です。
 
 ### いちばん簡単な方法: 1行で導入
@@ -46,7 +47,7 @@ Rula本体の準備が進みます。推論モデルや推論エンジンの取�
 2. 展開したフォルダの **`Rula-Setup.cmd`** をダブルクリックします。
    「Windows によって PC が保護されました」と出たら、「詳細情報」→「実行」を押します。
 3. 表示を確認して Enter を押すと、Rula本体の準備が進みます。
-4. Rulaフォルダの `start-tabbyapi.bat` でTabbyAPIを起動してから「Rula」または「RulaCoder」を起動します。
+4. 「Rula」または「RulaCoder」を起動します。各アプリが必要なローカル推論APIを自動で起動します。
 
 途中で止まっても、もう一度 `Rula-Setup.cmd` を実行すれば、取得済みのRula用ファイルはそのまま続きから再開します。
 Rula用PythonとPyPIパッケージは配布元のSHA256/固定バージョンを検証します。
@@ -145,10 +146,9 @@ Copy-Item "$env:LOCALAPPDATA\Programs\Rula\tabbyapi-config.yml" .\config.yml
 `%LOCALAPPDATA%\Programs\Rula\.env` に一般キーを `RULA_TABBYAPI_API_KEY`、
 adminキーを `RULA_TABBYAPI_ADMIN_KEY` として設定してください。
 adminキーはRulaがモデルをロード/解放するために使います。外部へ公開せず、このPC内でのみ利用してください。
-以後の起動にはRulaフォルダの `start-tabbyapi.bat` を使ってください。
-日本語Windowsの既定コンソール文字コードでログ出力が失敗し、Rula終了後のモデル再ロードが止まるのを防ぐため、
-この起動ファイルはTabbyAPIのPython出力をUTF-8に設定します。TabbyAPIを別の場所に入れた場合は
-`TABBYAPI_HOME` にそのフォルダを設定してください。
+初回セットアップ後、RulaがローカルTabbyAPIを自動で開始・終了します。
+TabbyAPIを別の場所に入れた場合は `TABBYAPI_HOME` にそのフォルダを設定してください。
+`start-tabbyapi.bat` は手動で起動・確認したい場合にも使えます。
 
 Rulaを開くと必要なモデルをロードし、Rulaを閉じるとモデルを解放します。これにより、8GB VRAMのGPUで
 Main RulaとCoderを順番に使えます。TabbyAPIの公式情報は[リポジトリ](https://github.com/theroyallab/tabbyAPI)と
@@ -163,9 +163,9 @@ ExLlamaV2公式のビルド済みwheelを導入します。公式リリースの
 ExLlamaV2本体は公式アーカイブ済みのため、wheelはv0.3.2に固定しています。PyTorchやCUDAを更新する場合は、
 その組み合わせに一致する公式wheelがあることを先に確認してください。
 
-```powershell
-.\install-coder-v2.ps1
-```
+TabbyAPIのPython環境がある場合、Rulaのセットアップがこのwheelを自動で確認・導入します。
+TabbyAPIをRulaより後から導入した場合は、Rulaのセットアップを再実行するか、
+`install-coder-v2.ps1` を一度実行してください。
 
 既定ではモデルを `%LOCALAPPDATA%\Programs\TabbyAPI\models\Qwen2.5-Coder-7B-Instruct-4.0bpw-exl2` に配置し、
 設定で `RULA_CODER_V2_MODEL_DIR` を指定します。必要な場合のみ `.env` に次を設定してください。
@@ -177,7 +177,7 @@ RULA_CODER_V2_MAX_SEQ_LEN=8192
 ```
 
 RulaCoder起動時にローカル専用のV2サーバーが自動起動し、終了時に停止します。Generate/Autoモードでは
-Main用Llama 3.1 8B PlannerをTabbyAPIで先に実行し、モデルを解放してからCoderをロードします。
+Qwen3.5 9B EXL3 PlannerをTabbyAPIで先に実行し、モデルを解放してからCoderをロードします。
 VRAM節約のため、RulaとRulaCoderを同時に起動しないでください。
 
 ### 2. APIキーを発行
@@ -232,7 +232,9 @@ Cloudflareに登録済みの独自ドメインが必要です。
 MainはTabbyAPI/ExLlamaV3、Coderは専用のExLlamaV2サーバーを使います。GPUメモリを節約するため、片方の起動中にもう片方を開くと、
 確認画面が表示され、「はい」で起動中のアプリを終了して切り替え、「いいえ」で現在のアプリを使い続けます。
 Coder専用アプリでは会話履歴とログを `%APPDATA%\RulaCoder` に分けて保存します。
-ExLlamaV2サーバーはCoder起動時に自動で開始し、終了時に停止します。Generate/AutoモードではPlannerがMain用TabbyAPIを使うため、TabbyAPIも起動してください。
+Rulaを起動するとMain用TabbyAPIが自動で開始し、Rulaを閉じるとRulaが開始したTabbyAPIだけを停止します。
+すでに起動していたTabbyAPIは停止しません。RulaCoderでは専用のExLlamaV2サーバーが自動で開始・停止します。
+Generate/AutoモードでPlannerがMain用TabbyAPIを必要とする場合も、自動で開始します。
 Main Rulaを閉じるとTabbyAPIモデル、RulaCoderを閉じるとExLlamaV2モデルが解放されます。
 
 | 画面 | できること |
@@ -280,17 +282,18 @@ adminキーはMain Rulaの起動時にモデルをロードし、終了時に解
 Ollamaでは `RULA_MAIN_OLLAMA_MODEL`、`RULA_MAIN_NUM_CTX` と `RULA_MAIN_KEEP_ALIVE` を設定できます。
 
 RulaCoderはExLlamaV2のQwen2.5-Coder-7B-Instruct EXL2 4.0bpwを既定で使います。
-Generate/AutoモードではLlama 3.1 8B Plannerが構造化JSON計画を作成し、ロードを解放した後に
+Generate/AutoモードではQwen3.5 9B EXL3 Plannerが構造化JSON計画を作成し、ロードを解放した後に
 Coderモデルが作業します。Plan/ChatモードはPlannerを呼び出しません。Planner出力は助言として扱い、
 実際のファイル配置はCoderのプロジェクト調査で確認します。
 Coder用モデルは自動取得されません。[取得済みの既成EXL2モデル](https://huggingface.co/DrNicefellow/Qwen2.5-Coder-7B-Instruct-4.0bpw-exl2/tree/1e06f08279089a5e80eef550d93a7909b12cf731)をTabbyAPIの `models` 以下へ配置してください。
 `install-coder-v2.ps1` が対応する公式V2 wheelをSHA-256検証して導入します。`.env` では
 `RULA_CODER_BACKEND=exllamav2`、`RULA_CODER_V2_MODEL_DIR`、`RULA_CODER_V2_MAX_SEQ_LEN`、
-`RULA_CODER_PLANNER_MODEL` を設定できます。V3のCoderを使う場合は
+`RULA_CODER_PLANNER_MODEL` (既定: `Qwen3.5-9B-EXL3-2.5bpw`) を設定できます。
+V3のCoderを使う場合は
 `RULA_CODER_BACKEND=tabbyapi` と `RULA_CODER_TABBYAPI_MODEL` を設定してください。
 Ollamaは `RULA_CODER_BACKEND=ollama` とし、`RULA_CODER_OLLAMA_MODEL` 等を設定すれば明示的に選べます。
 Ollama/StrataをCoderに指定した場合は、TabbyAPIの構造化Plannerは使用せず、既存の単一モデル動作になります。
-RulaCoder専用アプリはCoderモデルだけから起動し、Planner実行時のみLlamaを順番にロードします。
+RulaCoder専用アプリはCoderモデルだけから起動し、Planner実行時のみQwen3.5を順番にロードします。
 
 VRAM/RAMが限られるPCではモデルを同時に使わず、順番に使ってください。
 TabbyAPIのモデルロード/解放には `RULA_TABBYAPI_ADMIN_KEY` を設定します。
@@ -1035,9 +1038,11 @@ DISCORD_TOKEN=<Botトークン>
 - 爆発物・毒物など、大量に人を傷つける手段の具体的な製造手順
 - 実在の個人を標的にした攻撃・嫌がらせ・住所特定などのなりすまし
 
-この線引きは `src/rula/persona.py` の `HARD_LIMITS` に書かれており、呼び出し元の
-システムプロンプト(`system`)より後ろに常に付くため、そこからは上書きできません。
-ただしプロンプト上の制御であり、重みに含まれるものではありません(`NOTICE` を参照)。
+この線引きは `src/rula/persona.py` の `SAFETY_BOUNDARIES` に集約し、率直さや
+呼び出し元の追加コンテキストとは別に、毎回のシステムプロンプトへ付加します。
+率直モードの拒否再評価も、対応可能なら直接答え、境界に当たる場合は拒否を維持するよう
+指示します。ただし、どちらもプロンプトによる制御であり、モデルの重み自体を書き換える
+ものではありません(`NOTICE` を参照)。
 
 ## 外部公開時の注意
 

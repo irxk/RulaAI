@@ -30,6 +30,10 @@ class TabbyAPIEngine(StrataEngine):
         self.model = requested_model
         self.model_env = model_env
         self.settings_prefix = settings_prefix
+        if os.environ.get("RULA_APP_MODE", "").strip().lower() in {
+                "general", "coder"}:
+            from .local_services import ensure_tabbyapi_started
+            ensure_tabbyapi_started(base_url, api_key)
         self._ensure_model(requested_model)
         super().__init__(
             base_url=base_url,

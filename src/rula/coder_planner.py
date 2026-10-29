@@ -101,7 +101,7 @@ def create_coding_plan(engine, request_text: str, memory_context: str = "") -> d
 def format_coding_plan(plan: dict) -> str:
     """Render a validated planner result as advisory context for the coder."""
     return (
-        "Llama Plannerの構造化計画（提案。実際のコードを調査して必要なら修正すること）:\n"
+        "Qwen3.5 Plannerの構造化計画（提案。実際のコードを調査して必要なら修正すること）:\n"
         f"{json.dumps(plan, ensure_ascii=False, indent=2)}\n"
         "計画の対象ファイル名は未確認の候補です。実際の配置・既存変更をツールで確認してください。"
         "blocking_questionがnullでない場合は、調査後にask_userツールで質問して回答を待ってください。"

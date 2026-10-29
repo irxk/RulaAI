@@ -96,8 +96,19 @@ if (-not [Environment]::Is64BitOperatingSystem) { Fail "64bit 版の Windows が
     }
     Say "  OK" Green
 
-    # -- 2. 起動用のショートカット --------------------------------------------
-    Say "[2/2] 起動用のファイルを作っています" Cyan
+    # -- 2. Coder 推論環境 (TabbyAPI が導入済みの場合) -------------------------
+    $tabbyHome = if ($env:TABBYAPI_HOME) { $env:TABBYAPI_HOME }
+                 else { Join-Path $env:LOCALAPPDATA "Programs\TabbyAPI" }
+    if (Test-Path (Join-Path $tabbyHome "venv\Scripts\python.exe")) {
+        Say "[2/3] RulaCoder用 ExLlamaV2 を確認しています" Cyan
+        & (Join-Path $PSScriptRoot "install-coder-v2.ps1")
+        Say "  OK" Green
+    } else {
+        Say "[2/3] TabbyAPIがまだ見つからないため、Coder用wheelを後で導入します。" Yellow
+    }
+
+    # -- 3. 起動用のショートカット --------------------------------------------
+    Say "[3/3] 起動用のファイルを作っています" Cyan
     $build = Join-Path $PSScriptRoot "build.ps1"
     if ($NoShortcut) { & $build }
     elseif ($DesktopExe) { & $build -DesktopExe }
@@ -109,15 +120,17 @@ if (-not [Environment]::Is64BitOperatingSystem) { Fail "64bit 版の Windows が
 
     Say ""
     Say ("=== 完了しました ({0:N0} 分) ===" -f $sw.Elapsed.TotalMinutes) Green
-    Say "Rulaフォルダの start-tabbyapi.bat でMain用TabbyAPIを起動してください。" Yellow
-    Say "RulaCoder用には install-coder-v2.ps1 を一度実行してください。" Yellow
+    Say "Rula/RulaCoderの起動時に、それぞれの推論APIを自動で起動します。" Green
+    if (-not (Test-Path (Join-Path $tabbyHome "venv\Scripts\python.exe"))) {
+        Say "TabbyAPIを後から導入した場合は、Rulaのセットアップを再実行してCoder用wheelを準備してください。" Yellow
+    }
     if ($DesktopExe -and -not $NoShortcut) {
         Say "次からは、デスクトップの Rula.exe (またはスタートメニューの「Rula」) で起動します。"
     } else {
         Say "次からは、デスクトップかスタートメニューの「Rula」、またはこのフォルダの Rula.lnk で起動します。"
     }
     if (-not $NoLaunch) {
-        Say "Rula を起動します (先にstart-tabbyapi.batでTabbyAPIを起動してください)。"
+        Say "Rula を起動します。"
         $since = Get-Date
         $started = $true
         try { $proc = Start-Process $launcher -PassThru } catch { $started = $false }

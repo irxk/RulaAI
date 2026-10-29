@@ -23,6 +23,19 @@ from rula.version import __version__
 
 
 class GuiVersionTests(unittest.TestCase):
+    def test_setup_propagates_resolved_app_mode_to_engine_startup(self):
+        with tempfile.TemporaryDirectory() as temp, \
+                patch.object(server, "APP_MODE", "general"), \
+                patch.object(server, "DATA", temp), \
+                patch.object(server, "Memory"), \
+                patch.object(server.threading, "Thread"), \
+                patch.object(server.logging, "basicConfig"), \
+                patch("os.getcwd", return_value=temp), \
+                patch.dict(os.environ, {"RULA_APP_MODE": ""}):
+            server._setup(43128, "test-token")
+
+            self.assertEqual(os.environ["RULA_APP_MODE"], "general")
+
     def test_failed_write_activity_is_not_marked_complete(self):
         self.assertFalse(server._coder_tool_succeeded(
             "write_file", "形式エラー: 相対パス :: ファイル全文"))
