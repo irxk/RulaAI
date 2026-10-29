@@ -1,19 +1,16 @@
 ﻿# Rula を導入します。Rula-Setup.cmd をダブルクリックすると、これが動きます。
 #
-#   必要なもの: Windows 10/11 (64bit)、NVIDIA の GPU (VRAM 8GB 以上で 9B、6GB 以上で 4B)、
-#               空きディスク 約14GB (導入後は約8GB)、インターネット接続
-#   所要時間:   回線によって 10〜40 分 (ほとんどがモデルのダウンロード)
+#   必要なもの: Windows 10/11 (64bit)、インターネット接続
+#   Main RulaにはTabbyAPIとLlamaモデル、RulaCoderにはEXL2モデルとExLlamaV2 wheelが必要です。
+#   このスクリプトは推論サーバーやモデルをダウンロードしません。
 #
 # PC の設定は変えません。すべてこのフォルダの中に入ります(会話の履歴だけ
 # %APPDATA%\Rula)。消すときは、このフォルダと %APPDATA%\Rula を削除してください。
 # 途中で止まっても、もう一度実行すれば続きから再開します。
 #
-#   .\install.ps1                 VRAM に合わせてモデルを選ぶ
-#   .\install.ps1 -Model 4b       4B に固定
 #   .\install.ps1 -NoShortcut     デスクトップとスタートメニューにショートカットを置かない
 #   .\install.ps1 -DesktopExe     デスクトップに Rula.exe を置く (1行インストールの既定)
-param([ValidateSet("auto", "9b", "4b")][string]$Model = "auto",
-      [switch]$NoShortcut, [switch]$DesktopExe, [switch]$NoLaunch, [switch]$Yes)
+param([switch]$NoShortcut, [switch]$DesktopExe, [switch]$NoLaunch)
 $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
 $ProgressPreference = "SilentlyContinue"  # Expand-Archive の進捗表示は遅い
@@ -45,59 +42,11 @@ function Get-File($url, $out, $sha) {
 Say ""
 Say "=== Rula のセットアップ ===" Cyan
 Say ""
-Say "Rula は、この PC の GPU だけで動く日本語 AI アシスタントです。会話の内容は外に送りません"
+Say "Rula は TabbyAPI (ExLlamaV3) に接続して動く日本語 AI アシスタントです。"
+Say "標準設定の接続先はこの PC の TabbyAPI です。別の接続先では会話内容がそのサーバーに送られます。"
 Say "(質問に応じて Web 検索をするときは、検索語が検索エンジンに送られます)。"
-Say ""
-Say "ご注意:" Yellow
-Say "  会話モデルは、安全のための調整を緩めた「無検閲 (uncensored)」版です。" Yellow
-Say "  拒否のルールはプロンプトで与えているだけで、モデルの重みには含まれていません。" Yellow
-Say "  詳しくは NOTICE をお読みください。" Yellow
-Say ""
-
 try {
-# -- この PC で動くかを先に確かめる ------------------------------------------
 if (-not [Environment]::Is64BitOperatingSystem) { Fail "64bit 版の Windows が必要です。" }
-$smi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
-if (-not $smi) {
-    Fail "NVIDIA の GPU とドライバーが見つかりません。Rula は NVIDIA の GPU (VRAM 6GB 以上) で動きます。"
-}
-$gpu = (& nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader,nounits |
-        Select-Object -First 1) -split ",\s*"
-$gpuName, $vram, $driver = $gpu[0], [int]$gpu[1], $gpu[2]
-Say ("GPU: {0} (VRAM {1:N1}GB, ドライバー {2})" -f $gpuName, ($vram / 1024), $driver)
-# llama.cpp の CUDA 12.4 版は、ドライバー 551.61 以降で動く。
-if ([version]$driver -lt [version]"551.61") {
-    Fail "NVIDIA のドライバーが古いため動きません ($driver)。551.61 以降に更新してください (NVIDIA App または nvidia.com から)。"
-}
-if ($Model -eq "auto") {
-    if ($vram -ge 7800) { $Model = "9b" }
-    elseif ($vram -ge 5800) { $Model = "4b" }
-    else { Fail ("VRAM が足りません ({0:N1}GB)。6GB 以上の NVIDIA GPU が必要です。" -f ($vram / 1024)) }
-}
-# 既に入っているか (llama.cpp と、いずれかのモデル)。入っていれば「更新」:
-# 大きなダウンロードは起きないので、容量確認も開始確認も出さずに進める。
-$haveServer = Test-Path (Join-Path $PSScriptRoot "runtime\llama.cpp\llama-server.exe")
-$haveModel = @(Get-ChildItem (Join-Path $PSScriptRoot "models\gguf\*.gguf") -ErrorAction SilentlyContinue).Count -gt 0
-if ($haveServer -and $haveModel) {
-    Say "モデル: $Model    更新します (Python・llama.cpp・モデルはそのまま、コードだけ入れ替えます)。"
-} else {
-    # はじめての導入: 大きなダウンロードがある。容量を確かめ、始めてよいか尋ねる。
-    # 作業中に最も膨らむ量 (元のモデルと MTP 付きが並ぶ時)。取得済みのぶんは差し引く:
-    # 途中から再開するときに、もう置いてあるファイルの分まで空きを求めない。
-    $needGB = if ($Model -eq "9b") { 14 } else { 8 }
-    $haveBytes = (Get-ChildItem (Join-Path $PSScriptRoot "models"), (Join-Path $PSScriptRoot "runtime") `
-                    -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
-    $needGB = [math]::Max(1, [math]::Ceiling($needGB - [double]$haveBytes / 1GB))
-    $drive = (Get-Item $PSScriptRoot).PSDrive
-    $freeGB = [math]::Floor($drive.Free / 1GB)
-    Say "モデル: $Model    空きディスク: ${freeGB}GB (必要: 約${needGB}GB)"
-    if ($freeGB -lt $needGB) { Fail "ディスクの空きが足りません。$($drive.Name): ドライブを ${needGB}GB 以上空けてから、もう一度実行してください。" }
-    Say ""
-    if (-not $Yes) {
-        Say "続けるとダウンロードを始めます (合計 約$(if ($Model -eq '9b') {'7'} else {'4'})GB)。" Cyan
-        $null = Read-Host "Enter で開始 (やめるときはこのウィンドウを閉じてください)"
-    }
-}
 
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $dl = Join-Path $PSScriptRoot "runtime\downloads"
@@ -105,7 +54,7 @@ if ($haveServer -and $haveModel) {
     New-Item -ItemType Directory -Force -Path $dl | Out-Null
 
     # -- 1. Rula 専用の Python ------------------------------------------------
-    Say "[1/3] Python を用意しています" Cyan
+    Say "[1/2] Python を用意しています" Cyan
     $py = Join-Path $pyDir "python.exe"
     if (-not (Test-Path $py)) {
         Get-File $PY_URL "$dl\$PY_ZIP" $PY_SHA
@@ -147,12 +96,8 @@ if ($haveServer -and $haveModel) {
     }
     Say "  OK" Green
 
-    # -- 2. 推論エンジンとモデル ----------------------------------------------
-    Say "[2/3] 推論エンジンとモデルを取得しています (時間がかかります)" Cyan
-    & (Join-Path $PSScriptRoot "setup_llama.ps1") -Model $Model
-
-    # -- 3. 起動用のショートカット --------------------------------------------
-    Say "[3/3] 起動用のファイルを作っています" Cyan
+    # -- 2. 起動用のショートカット --------------------------------------------
+    Say "[2/2] 起動用のファイルを作っています" Cyan
     $build = Join-Path $PSScriptRoot "build.ps1"
     if ($NoShortcut) { & $build }
     elseif ($DesktopExe) { & $build -DesktopExe }
@@ -164,13 +109,15 @@ if ($haveServer -and $haveModel) {
 
     Say ""
     Say ("=== 完了しました ({0:N0} 分) ===" -f $sw.Elapsed.TotalMinutes) Green
+    Say "Rulaフォルダの start-tabbyapi.bat でMain用TabbyAPIを起動してください。" Yellow
+    Say "RulaCoder用には install-coder-v2.ps1 を一度実行してください。" Yellow
     if ($DesktopExe -and -not $NoShortcut) {
         Say "次からは、デスクトップの Rula.exe (またはスタートメニューの「Rula」) で起動します。"
     } else {
         Say "次からは、デスクトップかスタートメニューの「Rula」、またはこのフォルダの Rula.lnk で起動します。"
     }
     if (-not $NoLaunch) {
-        Say "Rula を起動します (初回はモデルの読み込みに 10 秒ほどかかります)。"
+        Say "Rula を起動します (先にstart-tabbyapi.batでTabbyAPIを起動してください)。"
         $since = Get-Date
         $started = $true
         try { $proc = Start-Process $launcher -PassThru } catch { $started = $false }

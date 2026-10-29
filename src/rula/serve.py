@@ -1,45 +1,45 @@
-r"""Keep the model warm so the app launches instantly.
-
-    python -m src.rula.serve        (or: .\warm.ps1)
-
-Starts llama-server once and leaves it running. While this is open, every Rula
-launch connects to the already-loaded model in about a second, instead of
-reloading the 9B into VRAM each time (~10-15 s). The window closing no longer
-unloads the model — the app only ever stops a server it started itself.
-
-The cost is VRAM: the model (about 6 GB for the 9B) stays resident the whole
-time this is open, even when no Rula window is up. Press Ctrl+C, or close this
-window, to stop it and free the VRAM.
-"""
+"""Check the inference server used by Rula."""
+import json
+import os
 import sys
-import threading
+import urllib.error
+import urllib.request
 
-from .llamaserver_backend import HOST, LlamaServerEngine
+from .engine import build_engine
 
 
 def main():
-    print("モデルを読み込んでいます… (初回は10秒ほど)")
+    backend = os.environ.get("RULA_MAIN_BACKEND", "tabbyapi").strip().lower()
+    if backend == "tabbyapi":
+        from .strata_backend import _normalize_base_url
+        url = _normalize_base_url(os.environ.get(
+            "RULA_TABBYAPI_BASE_URL", "http://127.0.0.1:5000/v1"
+        ))
+        health_url = url[:-3] + "/health"
+        print("TabbyAPIの稼働状態を確認しています…")
+        try:
+            with urllib.request.urlopen(health_url, timeout=5.0) as response:
+                status = json.loads(response.read().decode("utf-8")).get("status")
+        except (urllib.error.URLError, TimeoutError, OSError,
+                json.JSONDecodeError) as exc:
+            print(f"TabbyAPIに接続できません: {type(exc).__name__}: {exc}")
+            sys.exit(1)
+        if status != "healthy":
+            print(f"TabbyAPIは正常ではありません: {status or '状態不明'}")
+            sys.exit(1)
+        print(f"TabbyAPIに接続しました: {health_url}")
+        print("Main Rulaを開くと設定済みのモデルがロードされます。")
+        return
+
+    print(f"{backend or '推論'}モデルに接続しています…")
     try:
-        eng = LlamaServerEngine()
-    except Exception as e:
-        print(f"起動できませんでした: {e}")
+        engine = build_engine()
+    except Exception as exc:
+        print(f"推論サーバーに接続できません: {type(exc).__name__}: {exc}")
         sys.exit(1)
-    extra = []
-    if getattr(eng, "mtp", None):
-        extra.append("MTP")
-    if getattr(eng, "supports_vision", False):
-        extra.append("画像")
-    tag = f" ({' / '.join(extra)})" if extra else ""
-    print(f"\n準備完了: {eng.display_name}{tag} が {HOST} で待機しています。")
-    print("このウィンドウを開いている間、Rula の起動は一瞬になります。")
-    print("終了して VRAM を解放するには、Ctrl+C を押すか、このウィンドウを閉じてください。\n")
-    try:
-        threading.Event().wait()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        eng.close()
-        print("\n停止しました。VRAM を解放しました。")
+    print(f"\n準備完了: {engine.display_name} ({engine.backend})")
+    print(f"接続先: {engine.base_url}")
+    print("モデルの起動・停止とメモリ管理は推論サーバー側で行われます。")
 
 
 if __name__ == "__main__":

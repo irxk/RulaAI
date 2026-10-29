@@ -1,0 +1,13 @@
+network:
+  host: 127.0.0.1
+  port: 5000
+  disable_auth: false
+  allowed_origins: []
+
+model:
+  model_dir: models
+  model_name: Llama-3.1-8B-Instruct-exl3
+  use_as_default: [max_seq_len, cache_size, cache_mode]
+  max_seq_len: 8192
+  cache_size: 8192
+  cache_mode: Q4

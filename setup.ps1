@@ -3,9 +3,9 @@
 #   iwr -useb https://raw.githubusercontent.com/irxk/RulaAI/main/setup.ps1 | iex
 #
 # Downloads Rula into %LOCALAPPDATA%\Programs\Rula (or $env:RULA_HOME if set),
-# then runs install.ps1 there: it prepares Rula's own Python, llama.cpp and the
-# model, and puts Rula.exe and RulaCoder.exe on the desktop. Running this again updates Rula's
-# code and keeps everything already downloaded (the model, Python, llama.cpp).
+# then runs install.ps1 there: it prepares Rula's own Python and puts Rula.exe and
+# RulaCoder.exe on the desktop. Install Main's TabbyAPI, both model files, and the Coder wheel separately.
+# Running this again updates Rula's code and keeps its Python environment.
 #
 # Plain ASCII, no BOM: run through Invoke-Expression, a BOM breaks the first
 # line, and Windows PowerShell 5.1 misreads non-ASCII in a file without one.
@@ -31,7 +31,7 @@
         Expand-Archive -Path $zip -DestinationPath $tmp
         $src = Get-ChildItem -Path $tmp -Directory | Select-Object -First 1
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
-        # The code is replaced; runtime\ and models\ (Python, llama.cpp, the model) stay.
+        # The code is replaced; runtime\ (Rula's Python environment) stays.
         Copy-Item -Path (Join-Path $src.FullName '*') -Destination $dir -Recurse -Force
     } finally {
         Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue

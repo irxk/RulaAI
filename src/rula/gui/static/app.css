@@ -242,6 +242,22 @@ footer { flex: none; padding: 0 24px 18px; }
 }
 .profile-row #workspace-name { overflow: hidden; color: var(--faint); font-size: 12px;
                                text-overflow: ellipsis; white-space: nowrap; }
+.mode-description { color: var(--faint); font-size: 11px; }
+.command-policy-card { max-height: min(85vh, 760px); overflow-y: auto; }
+.command-policy-card label { display: block; margin: 14px 0 5px; color: var(--muted); font-size: 13px; }
+.command-policy-empty { color: var(--faint); font-size: 13px; }
+.command-policy-rule { display: grid; grid-template-columns: minmax(0, 1fr) auto auto;
+                       align-items: center; gap: 8px; margin: 6px 0; }
+.command-policy-rule code { overflow-wrap: anywhere; font-size: 12px; }
+.command-policy-rule select, .command-policy-add select {
+  max-width: 190px; padding: 7px; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--bg); color: var(--text);
+}
+.command-policy-rule button, .command-policy-add button {
+  padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); color: var(--text); cursor: pointer;
+}
+.command-policy-add { display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 16px; }
 .composer textarea {
   display: block; width: 100%; border: 0; outline: 0; resize: none; background: none;
   color: var(--text); font: inherit; max-height: 220px; padding: 4px 4px 2px 0;

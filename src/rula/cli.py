@@ -89,9 +89,9 @@ def _show_trace(trace, show: bool):
 def main():
     p = argparse.ArgumentParser(description=f"{NAME} — 日本語アシスタント")
     p.add_argument("--model-id", default=None,
-                   help="transformers で読むモデル。指定すると llama-server / Ollama は使わない"
-                        "(既定: llama-server。モデルは .env の RULA_GGUF で選ぶ)")
-    p.add_argument("--adapter", default=None, help="LoRAアダプタのディレクトリ")
+                   help="Strataサーバーに読み込まれたモデルID")
+    p.add_argument("--adapter", default=None,
+                   help="未対応: LoRAはStrataサーバー側で設定してください")
     p.add_argument("--think", action="store_true", help="思考モードを有効にして起動")
     p.add_argument("--candid", action="store_true", help="率直モード(無検閲)を有効にして起動")
     p.add_argument("--no-tools", action="store_true", help="ツールを無効にして起動")
@@ -107,9 +107,9 @@ def main():
     p.add_argument("--no-image-filter", action="store_true",
                    help="生成画像の安全フィルタを外す(誤検知で黒画像になる場合)")
     p.add_argument("--quantize", dest="quantize", action="store_true", default=None,
-                   help="4bit量子化を強制する(既定: 7Bは自動でON)")
+                   help="未対応: 量子化はStrataサーバー側で設定してください")
     p.add_argument("--no-quantize", dest="quantize", action="store_false",
-                   help="4bit量子化を使わない(VRAMに余裕がある場合)")
+                   help="未対応: 量子化はStrataサーバー側で設定してください")
     p.add_argument("--trace", action="store_true", help="内部動作を表示して起動")
     p.add_argument("--max-new-tokens", type=int, default=1024)
     p.add_argument("--temperature", type=float, default=0.7)
@@ -118,18 +118,18 @@ def main():
     p.add_argument("--memory-file", default="data/rula_memory.json",
                    help="ユーザー情報の保存先(--no-memory で無効化)")
     p.add_argument("--no-memory", action="store_true", help="記憶を保存しない")
-    p.add_argument("--device", default=None)
+    p.add_argument("--device", default=None,
+                   help="未対応: GPU割当はStrataサーバー側で設定してください")
     args = p.parse_args()
     if args.use_imagegen and find_spec("rula.imagegen") is None:
         p.error("このビルドには画像生成機能が含まれていません。")
+    if args.adapter:
+        p.error("--adapter は未対応です。モデル側のLoRAをStrataで読み込んでください。")
+    if args.device is not None or args.quantize is not None:
+        p.error("--device/--quantize は未対応です。Strataの起動設定で選択してください。")
 
-    print(f"{DIM}モデルを読み込んでいます…{RESET}")
-    # The same choice the API makes: llama-server, then Ollama, then transformers.
-    # This used to build the transformers Engine unconditionally, which meant the
-    # CLI ran without MTP or image support, and failed outright whenever
-    # transformers could not be imported.
-    engine = build_engine(args.model_id, adapter=args.adapter, device=args.device,
-                          quantize=args.quantize)
+    print(f"{DIM}Strataモデルに接続しています…{RESET}")
+    engine = build_engine(model_id=args.model_id)
     emb = None
     if not args.no_memory and EmbeddingMemory.is_available():
         import os

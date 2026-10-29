@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ from rula.agent import AgentConfig
 from rula.coder_agent import CoderAgent
 from rula.coder_workflow import CoderWorkflow
 from rula.tools import default_registry
+from rula.tools.coder import CoderTools
 from rula.gui import server
 from rula.version import __version__
 
@@ -47,6 +49,62 @@ class GuiVersionTests(unittest.TestCase):
         self.assertIn("差分レビュー", workflow)
         self.assertIn("無関係な成功コマンド", workflow)
 
+    def test_coder_modes_separate_assistant_generation_and_autonomy(self):
+        assistant = CoderWorkflow("chat", "medium").system_prompt()
+        generation = CoderWorkflow("generate", "medium").system_prompt()
+        autonomous = CoderWorkflow("auto", "medium").system_prompt()
+
+        self.assertIn("ファイル変更やコマンド実行はしません", assistant)
+        self.assertIn("作業フォルダ内のファイルを作成・編集", generation)
+        self.assertIn("実行前にユーザーへ確認", generation)
+        self.assertIn("未登録のコマンド", autonomous)
+
+    def test_generation_mode_enables_mutations_and_requires_completion_checks(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            registry = CoderTools(workspace, "generate").registry()
+            agent = CoderAgent(
+                SimpleNamespace(supports_thinking=False), AgentConfig(), default_registry())
+            agent.configure_request("generate", "medium", registry,
+                                    request_text="既存のコードを修正して")
+
+        self.assertIn("write_file", registry.names())
+        self.assertIn("run_command", registry.names())
+        self.assertTrue(agent.config.coder_auto)
+
+    def test_planner_runs_only_for_generate_and_auto_on_tabbyapi(self):
+        plan = {
+            "task_type": "feature",
+            "target_files": ["src/main.py"],
+            "requirements": ["Add feature"],
+            "context_summary": "Implement the requested feature.",
+            "validation": ["Run focused tests"],
+            "blocking_question": None,
+        }
+        planner = SimpleNamespace(close=lambda: None)
+        coder = SimpleNamespace(backend="tabbyapi", supports_thinking=False)
+        with patch("rula.engine.load_env_file"), patch(
+                "rula.tabbyapi_backend.TabbyAPIEngine", return_value=planner) as factory, \
+                patch("rula.coder_planner.create_coding_plan", return_value=plan) as create_plan:
+            agent = CoderAgent(coder, AgentConfig(), default_registry())
+            agent.configure_request(
+                "generate", "medium", default_registry(),
+                request_text="Add the feature",
+                memory_context="project note",
+            )
+
+        factory.assert_called_once()
+        create_plan.assert_called_once_with(planner, "Add the feature", "project note")
+        self.assertIn('"target_files": [', agent.config.extra_system)
+        self.assertIn("project note", agent.config.extra_system)
+
+    def test_planner_is_not_used_for_plan_or_chat_modes(self):
+        coder = SimpleNamespace(backend="tabbyapi", supports_thinking=False)
+        with patch("rula.tabbyapi_backend.TabbyAPIEngine") as factory:
+            for mode in ("plan", "chat"):
+                agent = CoderAgent(coder, AgentConfig(), default_registry())
+                agent.configure_request(mode, "medium", default_registry())
+
+        factory.assert_not_called()
     def test_coder_prompt_classifies_different_software_tasks(self):
         cases = {
             "login is broken; fix the error": "bugfix",
@@ -97,20 +155,38 @@ class GuiVersionTests(unittest.TestCase):
 
         self.assertTrue(agent.config.thinking)
 
-    def test_coder_profile_gets_separate_agent_with_shared_model_engine(self):
-        engine = SimpleNamespace(supports_thinking=True)
+    def test_coder_profile_gets_dedicated_coder_model_engine(self):
+        main_engine = SimpleNamespace(supports_thinking=True)
+        coder_engine = SimpleNamespace(supports_thinking=False, backend="ollama")
         chat = {"id": "test-coder-agent", "profile": "coder", "messages": []}
 
         with patch.dict(server._agents, {}, clear=True), patch.dict(
-                server.STATE, {"engine": engine}):
+                server.STATE, {"engine": main_engine}), patch.object(
+                    server, "build_coder_engine", return_value=coder_engine):
             agent = server._agent_for(chat)
 
         self.assertIsInstance(agent, CoderAgent)
-        self.assertIs(agent.engine, engine)
+        self.assertIs(agent.engine, coder_engine)
+
+    def test_coder_app_loads_only_its_dedicated_model(self):
+        coder_engine = SimpleNamespace(
+            display_name="Qwen2.5-Coder-7B-Instruct", backend="ollama")
+
+        with patch.object(server, "APP_MODE", "coder"), patch.dict(
+                server.STATE, {"engine": None, "status": "loading", "error": None}), \
+                patch.object(server, "build_coder_engine",
+                             return_value=coder_engine) as build_coder, \
+                patch.object(server, "build_engine") as build_main:
+            server._load_engine()
+
+            self.assertIs(server.STATE["engine"], coder_engine)
+            self.assertEqual(server.STATE["status"], "ready")
+            build_coder.assert_called_once_with()
+            build_main.assert_not_called()
 
     def test_stream_guard_recognizes_each_new_coder_tool(self):
         for name in ("find_files", "find_symbol", "read_files", "project_memory",
-                     "file_outline", "check_python"):
+                     "file_outline", "check_python", "verify_project"):
             with self.subTest(name=name):
                 self.assertIn(name, server._TOOL_WORDS)
 
@@ -156,6 +232,32 @@ class GuiVersionTests(unittest.TestCase):
             self.assertEqual(server._profile_for_app("general"), "coder")
             self.assertEqual(server._profile_for_app("fast"), "coder")
 
+    def test_workspace_command_permissions_api_persists_exact_rules(self):
+        request = Request({
+            "type": "http",
+            "headers": [
+                (b"host", b"127.0.0.1:43127"),
+                (b"x-rula-token", b"test-token"),
+            ],
+        })
+        with tempfile.TemporaryDirectory() as workspace, \
+                tempfile.TemporaryDirectory() as data, \
+                patch.dict(server.STATE, {"token": "test-token", "port": 43127}), \
+                patch.object(server, "DATA", data):
+            body = server.CommandPermissionsIn(
+                workspace=workspace,
+                rules=[
+                    {"command": "python -m pytest -q", "action": "allow"},
+                    {"command": "Remove-Item *", "action": "deny"},
+                ],
+            )
+            saved = server.save_command_permissions(body, request)
+            loaded = server.get_command_permissions(request, workspace)
+
+        self.assertEqual(saved["rules"], loaded["rules"])
+        self.assertEqual([rule["action"] for rule in loaded["rules"]],
+                         ["allow", "deny"])
+
     def test_switch_endpoint_requests_window_close_with_local_token(self):
         request = Request({
             "type": "http",
@@ -180,11 +282,15 @@ class GuiVersionTests(unittest.TestCase):
     def test_dedicated_coder_ui_is_locked_to_coder_profile(self):
         static = source_root / "rula" / "gui" / "static"
         app_js = (static / "app.js").read_text(encoding="utf-8")
+        app_html = (static / "index.html").read_text(encoding="utf-8")
         server_source = (source_root / "rula" / "gui" / "server.py").read_text(
             encoding="utf-8")
         root = source_root.parent
 
         self.assertIn('option.hidden = coder ? option.value !== "coder"', app_js)
+        self.assertIn('<option value="generate">コード生成AI</option>', app_html)
+        self.assertIn("ターミナル許可設定", app_html)
+        self.assertIn("command-permissions", app_js)
         self.assertIn('req.profile = _profile_for_app(req.profile)', server_source)
         self.assertIn('"RulaCoder" if APP_MODE == "coder" else "Rula"', server_source)
         launcher = (root / "launcher" / "RulaLauncher.cs").read_text(encoding="utf-8")

@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 
 import gc
 import json
+import logging
 import os
 from contextlib import contextmanager
 
@@ -146,52 +147,123 @@ class GenConfig:
     abort_check: "Callable[[str], bool] | None" = None
     # Stop reasoning after this many characters (None: the backend's own cap).
     think_cap: int | None = None
+    response_format: dict | None = None
 
 
 def build_engine(model_id: str | None = None, adapter: str | None = None,
                  device: str | None = None, quantize: bool | None = None,
                  prefer_fast: bool = True):
-    """Pick the fastest backend that can actually run here.
+    """Build the Main Rula engine, using TabbyAPI by default."""
+    load_env_file()
+    backend = os.environ.get("RULA_MAIN_BACKEND", "tabbyapi").strip().lower()
+    legacy_backend = os.environ.get("RULA_BACKEND", "").strip().lower()
+    if legacy_backend and legacy_backend != backend:
+        logging.getLogger("rula.engine").warning(
+            "RULA_BACKEND=%s は旧設定のため無視します。RULA_MAIN_BACKEND=%s を使用します。",
+            legacy_backend,
+            backend,
+        )
+    if adapter:
+        raise RuntimeError(
+            "LoRA adapter指定はこの推論APIでは使用できません。"
+        )
+    if device is not None or quantize is not None:
+        raise RuntimeError(
+            "device/quantize指定はこの推論APIでは使用できません。"
+            "モデルと実行設定は推論サーバー側で選択してください。"
+        )
+    if backend == "ollama":
+        from .ollama_backend import OllamaEngine
+        model = model_id or os.environ.get(
+            "RULA_MAIN_OLLAMA_MODEL", "llama3.1:8b"
+        ).strip()
+        return OllamaEngine(
+            model=model,
+            display_name=(
+                "Llama 3.1 8B Instruct"
+                if model == "llama3.1:8b" else model
+            ),
+            num_ctx=int(os.environ.get("RULA_MAIN_NUM_CTX", "8192")),
+            keep_alive=os.environ.get("RULA_MAIN_KEEP_ALIVE", "0"),
+        )
+    if backend == "strata":
+        return _build_strata_engine(model_id)
+    if backend == "tabbyapi":
+        from .tabbyapi_backend import TabbyAPIEngine
+        return TabbyAPIEngine(model_id)
+    raise RuntimeError(
+        "RULA_MAIN_BACKEND は tabbyapi、ollama、または strata を指定してください。"
+    )
 
-    llama-server first: the official llama.cpp build, run directly. Ollama 0.40
-    runs the same server underneath, so decode and prefill measured the same
-    (64.9 vs 65.9 tok/s, 2,745 vs 2,775 tok/s); what running it directly adds is
-    images through the chat model (--mmproj) and a q8_0 KV cache (-201 MiB).
-    Then Ollama. Then a local GGUF via llama-cpp-python. Then transformers, which
-    needs nothing installed beyond the requirements and always works.
 
-    RULA_BACKEND=ollama (or llama-server) pins the choice.
-
-    An explicit model_id or adapter means the caller wants a specific set of
-    weights, so the alternative backends — which serve their own — are skipped.
-    """
-    if prefer_fast and adapter is None and model_id is None:
-        order = [("llamaserver_backend", "LlamaServerEngine"),
-                 ("ollama_backend", "OllamaEngine"),
-                 ("llama_backend", "LlamaEngine")]
-        pinned = os.environ.get("RULA_BACKEND", "").strip().lower()
-        if pinned:
-            order = [o for o in order if o[0].startswith(pinned.replace("-", ""))]
-        for module, factory in order:
-            backend = _try_backend(module, factory)
-            if backend is not None:
-                return backend
-    return Engine(model_id, adapter=adapter, device=device, quantize=quantize)
+def _build_strata_engine(model_id: str | None = None):
+    if model_id:
+        requested = os.environ.get("RULA_STRATA_MODEL", "").strip()
+        if requested and requested != model_id:
+            raise RuntimeError(
+                "model_id と RULA_STRATA_MODEL が異なります。"
+                "Strataで使うモデルIDを RULA_STRATA_MODEL に一つだけ指定してください。"
+            )
+        os.environ.setdefault("RULA_STRATA_MODEL", model_id)
+    from .strata_backend import StrataEngine
+    return StrataEngine()
 
 
-def _try_backend(module: str, factory: str):
-    from importlib import import_module
-    try:
-        mod = import_module(f".{module}", __package__)
-        if not mod.available():
-            return None
-        return getattr(mod, factory)()
-    except BaseException as e:
-        # BaseException, not Exception: loading can fail well past the availability
-        # check, and a wheel built for instructions this CPU lacks dies with an
-        # illegal-instruction OSError. Falling back beats refusing to start.
-        print(f"[警告] {module} を使用できません ({type(e).__name__})。次の候補を試します。")
-        return None
+def build_coder_engine():
+    """Build the dedicated Coder model, independently of the main model."""
+    load_env_file()
+    backend = os.environ.get("RULA_CODER_BACKEND", "exllamav2").strip().lower()
+    if backend == "ollama":
+        from .ollama_backend import OllamaEngine
+        model = os.environ.get(
+            "RULA_CODER_OLLAMA_MODEL", "qwen2.5-coder:7b"
+        ).strip()
+        return OllamaEngine(
+            model=model,
+            display_name=(
+                "Qwen2.5-Coder-7B-Instruct"
+                if model == "qwen2.5-coder:7b" else model
+            ),
+            num_ctx=int(os.environ.get("RULA_CODER_NUM_CTX", "8192")),
+            keep_alive=os.environ.get("RULA_CODER_KEEP_ALIVE", "0"),
+        )
+    if backend == "strata":
+        return _build_strata_engine()
+    if backend == "exllamav2":
+        from .coder_v2_backend import ExLlamaV2Engine
+        return ExLlamaV2Engine()
+    if backend == "tabbyapi":
+        from .tabbyapi_backend import TabbyAPIEngine
+        model = (
+            os.environ.get("RULA_CODER_TABBYAPI_MODEL", "").strip()
+            or "Qwen2.5-Coder-7B-Instruct-exl3"
+        )
+        return TabbyAPIEngine(
+            model=model,
+            model_env="RULA_CODER_TABBYAPI_MODEL",
+            settings_prefix="RULA_CODER_TABBYAPI",
+            display_name=os.environ.get(
+                "RULA_CODER_TABBYAPI_DISPLAY_NAME",
+                "Qwen2.5-Coder-7B-Instruct",
+            ).strip(),
+        )
+    raise RuntimeError(
+        "RULA_CODER_BACKEND は exllamav2、tabbyapi、ollama、または strata "
+        "を指定してください。"
+    )
+
+
+def load_env_file(path: str | None = None) -> None:
+    """Load Rula's local .env settings without overriding process environment."""
+    env_path = path or os.path.join(os.getcwd(), ".env")
+    if not os.path.isfile(env_path):
+        return
+    with open(env_path, encoding="utf-8") as env_file:
+        for line in env_file:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, value = line.split("=", 1)
+                os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
 
 
 class Engine:
