@@ -150,6 +150,19 @@ class StrataBackendTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "TabbyAPI API に接続できません"):
                 build_engine()
 
+    def test_desktop_tabbyapi_backend_starts_its_local_service(self):
+        with patch.dict(os.environ, {
+                "RULA_APP_MODE": "general",
+                "RULA_TABBYAPI_BASE_URL": "http://127.0.0.1:5000/v1",
+                "RULA_TABBYAPI_API_KEY": "test-key",
+        }), patch("rula.local_services.ensure_tabbyapi_started") as start, \
+                patch.object(TabbyAPIEngine, "_ensure_model"), \
+                patch.object(StrataEngine, "_models",
+                             return_value=["Llama-3.1-8B-Instruct-exl3"]):
+            engine = TabbyAPIEngine()
+
+        start.assert_called_once_with(engine.base_url, "test-key")
+
     def test_tabbyapi_loads_and_unloads_model_with_admin_key(self):
         requests = []
         model_responses = iter([

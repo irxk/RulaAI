@@ -865,6 +865,8 @@ def _quit():
         shutdown = getattr(eng, "shutdown", None)
         if callable(shutdown):
             shutdown()
+    from ..local_services import stop_owned_tabbyapi
+    stop_owned_tabbyapi()
     try:
         os.remove(RUN_FILE)
     except OSError:
